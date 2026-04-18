@@ -123,6 +123,7 @@ class RobRewardManager():
                 'crash_rate': float(data.batch.get('crash', torch.zeros_like(success, dtype=torch.bool)).float().mean().item()),
                 'mean_episode_length': float(finish_step.float().mean().item()),
                 'mean_num_action_switches': float(data.batch.get('num_action_switches', torch.zeros_like(finish_step)).float().mean().item()),
+                'mean_fuel_proxy': float(data.batch.get('fuel_proxy', torch.zeros_like(success)).float().mean().item()),
                 'mean_abs_final_x': float(data.batch.get('final_x', torch.zeros_like(success)).abs().float().mean().item()),
                 'mean_abs_final_vx': float(data.batch.get('final_vx', torch.zeros_like(success)).abs().float().mean().item()),
                 'mean_abs_final_vy': float(data.batch.get('final_vy', torch.zeros_like(success)).abs().float().mean().item()),
@@ -266,9 +267,12 @@ def main_task(config):
             Role.RefPolicy: ray.remote(RobActorRolloutRefWorker)
         }
 
+    use_gpu = int(config.trainer.n_gpus_per_node) > 0
+    processes_per_node = int(config.trainer.n_gpus_per_node) if use_gpu else 1
+
     global_pool_id = 'global_pool'
     resource_pool_spec = {
-        global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+        global_pool_id: [processes_per_node] * config.trainer.nnodes,
     }
     mapping = {role: global_pool_id for role in role_worker_mapping.keys()}
 
@@ -299,7 +303,11 @@ def main_task(config):
     # Note that we always use function-based RM for validation
     val_reward_fn = RobRewardManager( num_examine=1,config=config)
 
-    resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+    resource_pool_manager = ResourcePoolManager(
+        resource_pool_spec=resource_pool_spec,
+        mapping=mapping,
+        use_gpu=use_gpu,
+    )
 
     trainer = RayTrainer(config=config,
                             tokenizer=tokenizer,

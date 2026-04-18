@@ -35,6 +35,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl import DataProto
 from verl.trainer.ppo import core_algos
 from verl.utils.dataset.rob_dataset import BufferedDataLoader
+from verl.utils.lunarlander_logging import LunarLanderArtifactLogger
 
 WorkerType = Type[Worker]
 
@@ -60,6 +61,7 @@ class ResourcePoolManager:
     """
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
+    use_gpu: bool = True
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -68,7 +70,7 @@ class ResourcePoolManager:
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
             # For Megatron backend, we recommend using max_colocate_count>1 that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(process_on_nodes=process_on_nodes,
-                                            use_gpu=True,
+                                            use_gpu=self.use_gpu,
                                             max_colocate_count=1,
                                             name_prefix=resource_pool_name)
             self.resource_pool_dict[resource_pool_name] = resource_pool
@@ -255,6 +257,7 @@ def compute_data_metrics(batch,config):
             'critic/task/crash_rate': crash.mean().detach().item(),
             'critic/task/mean_episode_length': batch.batch['finish_step'].float().mean().detach().item(),
             'critic/task/mean_num_action_switches': batch.batch.get('num_action_switches', torch.zeros_like(batch.batch['finish_step'])).float().mean().detach().item(),
+            'critic/task/mean_fuel_proxy': batch.batch.get('fuel_proxy', torch.zeros_like(success)).float().mean().detach().item(),
             'critic/task/mean_abs_final_x': batch.batch.get('final_x', torch.zeros_like(success)).abs().float().mean().detach().item(),
             'critic/task/mean_abs_final_vx': batch.batch.get('final_vx', torch.zeros_like(success)).abs().float().mean().detach().item(),
             'critic/task/mean_abs_final_vy': batch.batch.get('final_vy', torch.zeros_like(success)).abs().float().mean().detach().item(),
@@ -511,6 +514,9 @@ class RayTrainer(object):
 
         global_steps = 0
         self._last_alignment_snapshot = None
+        artifact_logger = None
+        if self.config.data.task_suite_name == "lunarlander":
+            artifact_logger = LunarLanderArtifactLogger(self.config.trainer.default_local_dir)
         dp_size = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         batch_size = self.config.data.train_batch_size
         n_samples = self.config.data.n_samples
@@ -522,6 +528,8 @@ class RayTrainer(object):
             val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
             pprint(f'Initial validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=global_steps)
+            if artifact_logger is not None:
+                artifact_logger.log_metrics(step=global_steps, data=val_metrics)
             if self.config.trainer.get('val_only', False):
                 return
 
@@ -601,6 +609,7 @@ class RayTrainer(object):
                     
                     # do accuracy filtering and score logging
                     with Timer(name='acc&trunc_filter', text="{name}: {seconds:.1f} seconds") as timer:
+                        filtered_roll_batch = roll_batch
                         if self.config.data.filter_accuracy or self.config.data.filter_truncated:
                             print(f"before filtering: {len(roll_batch)}")
                             filtered_roll_batch = self.filter(roll_batch.batch['acc'].unsqueeze(1), roll_batch, n_samples)
@@ -707,6 +716,8 @@ class RayTrainer(object):
                     metrics['timing/testing'] = timer.last
                     metrics.update(val_metrics)
                     logger.log(data=val_metrics, step=global_steps)
+                    if artifact_logger is not None:
+                        artifact_logger.log_metrics(step=global_steps, data=val_metrics)
 
                 # collect metrics
                 with Timer(name='logging1', text="{name}: {seconds:.1f} seconds") as timer:
@@ -730,6 +741,8 @@ class RayTrainer(object):
                 with Timer(name='logging3', text="{name}: {seconds:.1f} seconds") as timer:
                     # TODO: make a canonical logger that supports various backend
                     logger.log(data=metrics, step=global_steps)
+                    if artifact_logger is not None:
+                        artifact_logger.log_metrics(step=global_steps, data=metrics)
 
                 if self.config.trainer.save_freq > 0 and (global_steps + 1) % self.config.trainer.save_freq == 0:
                     actor_local_path = os.path.join(self.config.trainer.default_local_dir, 'actor',
@@ -758,6 +771,8 @@ class RayTrainer(object):
             val_metrics = self._validate(global_steps=global_steps)
             pprint(f'Final validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=global_steps)
+            if artifact_logger is not None:
+                artifact_logger.log_metrics(step=global_steps, data=val_metrics)
 
     def filter_format(self, reward_tensor, batch, n_samples):
         """

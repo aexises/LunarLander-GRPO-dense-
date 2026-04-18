@@ -4,36 +4,41 @@ set -x
 PROJECT_NAME="${PROJECT_NAME:-SimpleVLA-RL}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-lunarlander_grpo_sanity}"
 CKPT_PATH="${CKPT_PATH:-checkpoints}"
-NUM_GPUS="${NUM_GPUS:-1}"
+NUM_GPUS="${NUM_GPUS:-0}"
 NUM_NODES="${NUM_NODES:-1}"
 ABLATION="${ABLATION:-full}"
 
 case "$ABLATION" in
   terminal_only)
+    REWARD_MODE=terminal_only
     W_SUB=0.0
     W_PROG=0.0
     W_SMOOTH=0.0
     W_FINAL=1.0
     ;;
   terminal_smooth)
+    REWARD_MODE=lunarlander_shaped
     W_SUB=0.0
     W_PROG=0.0
     W_SMOOTH=0.02
     W_FINAL=1.0
     ;;
   terminal_sub_prog)
+    REWARD_MODE=lunarlander_shaped
     W_SUB=0.10
     W_PROG=0.30
     W_SMOOTH=0.0
     W_FINAL=1.0
     ;;
   full)
+    REWARD_MODE=lunarlander_shaped
     W_SUB=0.10
     W_PROG=0.30
     W_SMOOTH=0.02
     W_FINAL=1.0
     ;;
   dense_only)
+    REWARD_MODE=lunarlander_shaped
     W_SUB=0.10
     W_PROG=0.30
     W_SMOOTH=0.02
@@ -73,7 +78,7 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   actor_rollout_ref.actor.ppo_epochs=2 \
   actor_rollout_ref.rollout.name=hf \
   actor_rollout_ref.rollout.task_suite_name=lunarlander \
-  actor_rollout_ref.rollout.env_name=LunarLander-v2 \
+  actor_rollout_ref.rollout.env_name=LunarLander-v3 \
   actor_rollout_ref.rollout.max_steps=400 \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
   actor_rollout_ref.rollout.temperature=1.0 \
@@ -81,7 +86,7 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   algorithm.adv_estimator=grpo \
   algorithm.kl_ctrl.kl_coef=0.0 \
   verifier.reward_coef=1.0 \
-  reward.mode=lunarlander_shaped \
+  reward.mode=$REWARD_MODE \
   reward.distribution_mode=last_token_per_step \
   reward.weights.sub=$W_SUB \
   reward.weights.prog=$W_PROG \

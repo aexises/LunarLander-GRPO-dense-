@@ -88,7 +88,7 @@ actor_rollout_ref:
     action_chunks_len: ${actor_rollout_ref.model.action_chunks_len}
     observation_dim: 8
     action_dim: 4
-    env_name: LunarLander-v2
+    env_name: LunarLander-v3
     max_steps: 400
     experiment_name: None
     unnorm_key: libero_10

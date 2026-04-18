@@ -24,12 +24,20 @@ from torch.distributions import Categorical
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
+from verl.utils.lunarlander_logging import write_trajectory_plot
 from verl.utils.lunarlander_shaped_reward import (
     PHASE_NAMES,
     LunarLanderRewardConfig,
     classify_phase,
     compute_step_reward,
 )
+
+FUEL_PROXY_COST = {
+    0: 0.0,
+    1: 1.0,
+    2: 2.0,
+    3: 1.0,
+}
 
 
 class LunarLanderPolicy(nn.Module):
@@ -80,7 +88,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
                 "Please install gymnasium[box2d] before running the LunarLander script."
             ) from exc
 
-        env_name = self.config.rollout.get("env_name", "LunarLander-v2")
+        env_name = self.config.rollout.get("env_name", "LunarLander-v3")
         env = gym.make(env_name)
         obs, info = env.reset(seed=seed)
         return env, obs, info
@@ -153,6 +161,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             dump_path = dump_dir / file_name
             with dump_path.open("w", encoding="utf-8") as file_obj:
                 json.dump(payload, file_obj, indent=2)
+            write_trajectory_plot(payload, dump_path.with_suffix(".png"))
 
             if is_success:
                 success_written += 1
@@ -177,6 +186,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
         r_final = []
         r_total = []
         step_dump = []
+        fuel_proxy = 0.0
 
         prev_action = None
         prev_phase = None
@@ -219,6 +229,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             r_smooth.append(reward_dict["r_smooth"])
             r_final.append(reward_dict["r_final"])
             r_total.append(reward_dict["r_total"])
+            fuel_proxy += FUEL_PROXY_COST.get(action, 0.0)
             step_dump.append(
                 {
                     "step": step,
@@ -233,6 +244,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
                         "r_final": reward_dict["r_final"],
                         "r_total": reward_dict["r_total"],
                     },
+                    "fuel_proxy": fuel_proxy,
                 }
             )
 
@@ -264,6 +276,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
                 "final_vy": float(final_obs[3]),
                 "final_theta": float(final_obs[4]),
                 "num_action_switches": num_action_switches,
+                "fuel_proxy": fuel_proxy,
             },
         }
         return {
@@ -281,6 +294,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "crash": crash,
             "episode_length": episode_length,
             "num_action_switches": num_action_switches,
+            "fuel_proxy": fuel_proxy,
             "final_x": float(final_obs[0]),
             "final_vx": float(final_obs[2]),
             "final_vy": float(final_obs[3]),
@@ -313,6 +327,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
         crash = torch.zeros(batch_size, dtype=torch.bool)
         episode_length = torch.zeros(batch_size, dtype=torch.long)
         num_action_switches = torch.zeros(batch_size, dtype=torch.long)
+        fuel_proxy = torch.zeros(batch_size, dtype=torch.float32)
         final_x = torch.zeros(batch_size, dtype=torch.float32)
         final_vx = torch.zeros(batch_size, dtype=torch.float32)
         final_vy = torch.zeros(batch_size, dtype=torch.float32)
@@ -327,6 +342,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             crash[batch_idx] = episode["crash"]
             episode_length[batch_idx] = steps
             num_action_switches[batch_idx] = episode["num_action_switches"]
+            fuel_proxy[batch_idx] = episode["fuel_proxy"]
             final_x[batch_idx] = episode["final_x"]
             final_vx[batch_idx] = episode["final_vx"]
             final_vy[batch_idx] = episode["final_vy"]
@@ -379,6 +395,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "crash": crash.to(self.device),
             "episode_length": episode_length.to(self.device),
             "num_action_switches": num_action_switches.to(self.device),
+            "fuel_proxy": fuel_proxy.to(self.device),
             "final_x": final_x.to(self.device),
             "final_vx": final_vx.to(self.device),
             "final_vy": final_vy.to(self.device),

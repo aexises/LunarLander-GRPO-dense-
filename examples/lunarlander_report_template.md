@@ -32,6 +32,7 @@
 - Success-rate curves:
 - Shaped-reward curves:
 - Action-switch statistics:
+- Fuel proxy statistics:
 - Phase-progress statistics:
 - Example successful trajectories:
 - Example failed trajectories:
