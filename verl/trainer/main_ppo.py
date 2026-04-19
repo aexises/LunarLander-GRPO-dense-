@@ -18,6 +18,7 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 import json
 import os
 import statistics
+import hashlib
 from functools import partial
 
 import numpy as np
@@ -25,7 +26,7 @@ from verl import DataProto
 import torch
 from verl.utils.reward_score import gsm8k, math, countdown, multiply, logic
 from verl.trainer.ppo.ray_trainer import RayTrainer
-from verl.utils.lunarlander_shaped_reward import LunarLanderRewardConfig
+from verl.utils.lunarlander_shaped_reward import LunarLanderRewardConfig, PHASE_NAMES
 import warnings
 warnings.filterwarnings("ignore", message="Batch mode enable graph is only supported with num_graph_seeds==1")
 
@@ -54,6 +55,63 @@ def _safe_correlation(values: torch.Tensor, targets: torch.Tensor) -> float:
     if len(x) < 2 or np.allclose(x, x[0]) or np.allclose(y, y[0]):
         return 0.0
     return float(np.corrcoef(x, y)[0, 1])
+
+
+def _safe_mean(tensor: torch.Tensor) -> float:
+    if tensor.numel() == 0:
+        return 0.0
+    return float(tensor.float().mean().item())
+
+
+def _component_share(weighted_component: torch.Tensor, denom: torch.Tensor) -> float:
+    if weighted_component.numel() == 0:
+        return 0.0
+    safe = torch.where(denom > 0, weighted_component.abs() / denom, torch.zeros_like(weighted_component))
+    return float(safe.mean().item())
+
+
+def _phase_metrics(data: DataProto) -> dict[str, float]:
+    if 'phase' not in data.batch:
+        return {}
+    finish_step = data.batch['finish_step'].long()
+    phase_tensor = data.batch['phase'].long()
+    metrics = {}
+
+    for phase_id, phase_name in PHASE_NAMES.items():
+        phase_mask = phase_tensor == phase_id
+        step_counts = []
+        visit_counts = []
+        for batch_idx in range(phase_tensor.shape[0]):
+            steps = int(finish_step[batch_idx].item())
+            if steps <= 0:
+                continue
+            valid = phase_tensor[batch_idx, :steps]
+            count = int((valid == phase_id).sum().item())
+            step_counts.append(count)
+            visit_counts.append(1.0 if count > 0 else 0.0)
+        metrics[f'phase_steps/{phase_name.lower()}'] = float(sum(step_counts))
+        metrics[f'phase_episode_visits/{phase_name.lower()}'] = float(np.mean(visit_counts)) if visit_counts else 0.0
+
+    transition_counts = {}
+    num_phase_transitions = []
+    for batch_idx in range(phase_tensor.shape[0]):
+        steps = int(finish_step[batch_idx].item())
+        if steps <= 1:
+            continue
+        valid = phase_tensor[batch_idx, :steps].tolist()
+        local_transitions = 0
+        for prev_phase, cur_phase in zip(valid[:-1], valid[1:]):
+            if prev_phase == cur_phase or prev_phase < 0 or cur_phase < 0:
+                continue
+            local_transitions += 1
+            key = f'{PHASE_NAMES[int(prev_phase)].lower()}_to_{PHASE_NAMES[int(cur_phase)].lower()}'
+            transition_counts[key] = transition_counts.get(key, 0.0) + 1.0
+        num_phase_transitions.append(local_transitions)
+
+    for key, value in transition_counts.items():
+        metrics[f'phase_transitions/{key}'] = float(value)
+    metrics['mean_num_phase_transitions'] = float(np.mean(num_phase_transitions)) if num_phase_transitions else 0.0
+    return metrics
 
 
 def _build_step_reward_tensors(data: DataProto, distribution_mode: str) -> dict[str, torch.Tensor]:
@@ -112,27 +170,73 @@ class RobRewardManager():
         if 'r_total' in data.batch.keys():
             finish_step = data.batch['finish_step'].long()
             success = data.batch.get('success', data.batch['complete']).float()
+            crash = data.batch.get('crash', torch.zeros_like(success, dtype=torch.bool)).float()
+            terminated = finish_step.gt(0).float()
+            truncated = data.batch.get('truncated', torch.zeros_like(success, dtype=torch.bool)).float()
             episode_total = data.batch['r_total'].sum(dim=1)
+            episode_r_sub = data.batch['r_sub'].sum(dim=1)
+            episode_r_prog = data.batch['r_prog'].sum(dim=1)
+            episode_r_smooth = data.batch['r_smooth'].sum(dim=1)
+            episode_r_final = data.batch['r_final'].sum(dim=1)
+            reward_cfg = LunarLanderRewardConfig.from_config(self.config)
+            weighted_r_sub = reward_cfg.w_sub * episode_r_sub
+            weighted_r_prog = reward_cfg.w_prog * episode_r_prog
+            weighted_r_smooth = reward_cfg.w_smooth * episode_r_smooth
+            weighted_r_final = reward_cfg.w_final * episode_r_final
+            contribution_denom = weighted_r_sub.abs() + weighted_r_prog.abs() + weighted_r_smooth.abs() + weighted_r_final.abs()
             reward_metrics.update({
                 'mean_total_reward': float(episode_total.mean().item()),
-                'mean_r_sub': _masked_step_mean(data.batch['r_sub'], finish_step),
-                'mean_r_prog': _masked_step_mean(data.batch['r_prog'], finish_step),
-                'mean_r_smooth': _masked_step_mean(data.batch['r_smooth'], finish_step),
-                'mean_r_final': _masked_step_mean(data.batch['r_final'], finish_step),
+                'mean_r_sub': float(episode_r_sub.mean().item()),
+                'mean_r_prog': float(episode_r_prog.mean().item()),
+                'mean_r_smooth': float(episode_r_smooth.mean().item()),
+                'mean_r_final': float(episode_r_final.mean().item()),
+                'mean_weighted_r_sub': float(weighted_r_sub.mean().item()),
+                'mean_weighted_r_prog': float(weighted_r_prog.mean().item()),
+                'mean_weighted_r_smooth': float(weighted_r_smooth.mean().item()),
+                'mean_weighted_r_final': float(weighted_r_final.mean().item()),
                 'success_rate': float(success.mean().item()),
-                'crash_rate': float(data.batch.get('crash', torch.zeros_like(success, dtype=torch.bool)).float().mean().item()),
+                'terminated_rate': float(terminated.mean().item()),
+                'truncated_rate': float(truncated.mean().item()),
+                'crash_rate': float(crash.mean().item()),
                 'mean_episode_length': float(finish_step.float().mean().item()),
                 'mean_num_action_switches': float(data.batch.get('num_action_switches', torch.zeros_like(finish_step)).float().mean().item()),
+                'mean_num_phase_transitions': float(data.batch.get('num_phase_transitions', torch.zeros_like(finish_step)).float().mean().item()),
                 'mean_fuel_proxy': float(data.batch.get('fuel_proxy', torch.zeros_like(success)).float().mean().item()),
                 'mean_abs_final_x': float(data.batch.get('final_x', torch.zeros_like(success)).abs().float().mean().item()),
                 'mean_abs_final_vx': float(data.batch.get('final_vx', torch.zeros_like(success)).abs().float().mean().item()),
                 'mean_abs_final_vy': float(data.batch.get('final_vy', torch.zeros_like(success)).abs().float().mean().item()),
                 'mean_abs_final_theta': float(data.batch.get('final_theta', torch.zeros_like(success)).abs().float().mean().item()),
                 'corr_total_reward_success': _safe_correlation(episode_total, success),
-                'corr_r_sub_success': _safe_correlation(data.batch['r_sub'].mean(dim=1), success),
-                'corr_r_prog_success': _safe_correlation(data.batch['r_prog'].mean(dim=1), success),
-                'corr_r_smooth_success': _safe_correlation(data.batch['r_smooth'].mean(dim=1), success),
+                'corr_r_sub_success': _safe_correlation(episode_r_sub, success),
+                'corr_r_prog_success': _safe_correlation(episode_r_prog, success),
+                'corr_r_smooth_success': _safe_correlation(episode_r_smooth, success),
+                'share_abs_weighted_r_sub': _component_share(weighted_r_sub, contribution_denom),
+                'share_abs_weighted_r_prog': _component_share(weighted_r_prog, contribution_denom),
+                'share_abs_weighted_r_smooth': _component_share(weighted_r_smooth, contribution_denom),
+                'share_abs_weighted_r_final': _component_share(weighted_r_final, contribution_denom),
             })
+
+            for prefix, mask in {
+                'successful_episodes': success > 0.5,
+                'failed_episodes': success <= 0.5,
+            }.items():
+                if not mask.any():
+                    continue
+                reward_metrics.update({
+                    f'{prefix}/mean_total_reward': _safe_mean(episode_total[mask]),
+                    f'{prefix}/mean_weighted_r_sub': _safe_mean(weighted_r_sub[mask]),
+                    f'{prefix}/mean_weighted_r_prog': _safe_mean(weighted_r_prog[mask]),
+                    f'{prefix}/mean_weighted_r_smooth': _safe_mean(weighted_r_smooth[mask]),
+                    f'{prefix}/mean_weighted_r_final': _safe_mean(weighted_r_final[mask]),
+                    f'{prefix}/mean_num_action_switches': _safe_mean(data.batch.get('num_action_switches', torch.zeros_like(finish_step)).float()[mask]),
+                    f'{prefix}/mean_fuel_proxy': _safe_mean(data.batch.get('fuel_proxy', torch.zeros_like(success)).float()[mask]),
+                    f'{prefix}/share_abs_weighted_r_sub': _component_share(weighted_r_sub[mask], contribution_denom[mask]),
+                    f'{prefix}/share_abs_weighted_r_prog': _component_share(weighted_r_prog[mask], contribution_denom[mask]),
+                    f'{prefix}/share_abs_weighted_r_smooth': _component_share(weighted_r_smooth[mask], contribution_denom[mask]),
+                    f'{prefix}/share_abs_weighted_r_final': _component_share(weighted_r_final[mask], contribution_denom[mask]),
+                })
+
+            reward_metrics.update(_phase_metrics(data))
 
         return score, reward_metrics, format_metrics, reward_format_metrics
 
@@ -221,6 +325,8 @@ def main_task(config):
         with open_dict(config.actor_rollout_ref):
             config.actor_rollout_ref.reward = config.reward
             config.actor_rollout_ref.eval = config.eval
+            config.actor_rollout_ref.audit = config.audit
+            config.actor_rollout_ref.audit.output_dir = config.trainer.default_local_dir
 
     if is_lunarlander:
         tokenizer = _DummyTokenizer()

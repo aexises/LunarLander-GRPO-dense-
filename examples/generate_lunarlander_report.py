@@ -22,6 +22,7 @@ def summarize_run(run_dir: Path):
     weights = reward.get("weights", {})
     trainer = config.get("trainer", {})
     eval_cfg = config.get("eval", {})
+    rollout_cfg = config.get("actor_rollout_ref", {}).get("rollout", {})
     return {
         "name": trainer.get("experiment_name", run_dir.name),
         "dir": run_dir,
@@ -29,6 +30,7 @@ def summarize_run(run_dir: Path):
         "summary": summary,
         "eval_seeds": eval_cfg.get("seed_list", []),
         "reward": reward,
+        "env_name": rollout_cfg.get("env_name", "LunarLander-v3"),
     }
 
 
@@ -46,13 +48,14 @@ def build_report(runs: list[dict], output_path: Path):
 
     representative = runs[0]
     reward_cfg = representative["reward"]
+    env_name = representative["summary"].get("environment") or representative.get("env_name") or "LunarLander-v3"
 
     lines = [
         "# LunarLander Reward Sanity Check Report",
         "",
         "## Setup",
         "",
-        "- Environment: `LunarLander-v2`",
+        f"- Environment: `{env_name}`",
         f"- Seed list: `{representative['eval_seeds']}`",
         f"- Phase thresholds: `{reward_cfg.get('phase_thresholds', {})}`",
         f"- Success thresholds: `{reward_cfg.get('success', {})}`",

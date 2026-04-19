@@ -17,6 +17,8 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import os
+import json
+import hashlib
 import statistics
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
@@ -369,6 +371,8 @@ class RayTrainer(object):
         reward_tensor_lst = []
         data_source_lst = []
         metric_accumulator = defaultdict(list)
+        eval_seed_list = list(self.config.eval.seed_list)
+        deterministic_eval = True
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
            
@@ -376,7 +380,7 @@ class RayTrainer(object):
                 'eos_token_id': self.tokenizer.eos_token_id,
                 'pad_token_id': self.tokenizer.pad_token_id,
                 'recompute_log_prob': False,
-                'do_sample': False,
+                'do_sample': not deterministic_eval,
                 'validate': True,
                 "global_steps":global_steps
             }
@@ -419,6 +423,10 @@ class RayTrainer(object):
             metric_dict[f'test_score/{data_source}'] = np.mean(rewards)
 
         metric_dict[f'test_score/all'] = reward_tensor.mean().item()
+        metric_dict['test_meta/num_eval_episodes'] = int(reward_tensor.shape[0])
+        metric_dict['test_meta/eval_seed_hash'] = hashlib.md5(json.dumps(eval_seed_list).encode("utf-8")).hexdigest()[:12]
+        metric_dict['test_meta/deterministic_eval'] = 1.0 if deterministic_eval else 0.0
+        metric_dict['test_meta/eval_seed_list'] = json.dumps(eval_seed_list)
 
         return metric_dict
 
@@ -516,7 +524,11 @@ class RayTrainer(object):
         self._last_alignment_snapshot = None
         artifact_logger = None
         if self.config.data.task_suite_name == "lunarlander":
-            artifact_logger = LunarLanderArtifactLogger(self.config.trainer.default_local_dir)
+            artifact_logger = LunarLanderArtifactLogger(
+                self.config.trainer.default_local_dir,
+                config=OmegaConf.to_container(self.config, resolve=True),
+                reset_existing=True,
+            )
         dp_size = self.actor_rollout_wg.world_size // self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         batch_size = self.config.data.train_batch_size
         n_samples = self.config.data.n_samples
@@ -711,13 +723,10 @@ class RayTrainer(object):
                 # validate
                 if self.val_reward_fn is not None and (global_steps + 1) % self.config.trainer.test_freq == 0:
                     with Timer(name='testing', text="{name}: {seconds:.1f} seconds") as timer:
-                        val_metrics: dict = self._validate(global_steps=global_steps+1)
+                        val_metrics: dict = self._validate(global_steps=global_steps)
                         val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
                     metrics['timing/testing'] = timer.last
                     metrics.update(val_metrics)
-                    logger.log(data=val_metrics, step=global_steps)
-                    if artifact_logger is not None:
-                        artifact_logger.log_metrics(step=global_steps, data=val_metrics)
 
                 # collect metrics
                 with Timer(name='logging1', text="{name}: {seconds:.1f} seconds") as timer:
@@ -769,6 +778,7 @@ class RayTrainer(object):
         # perform validation after training
         if self.val_reward_fn is not None:
             val_metrics = self._validate(global_steps=global_steps)
+            val_metrics = {f'val/{key}': val for key, val in val_metrics.items()}
             pprint(f'Final validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=global_steps)
             if artifact_logger is not None:

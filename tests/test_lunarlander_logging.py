@@ -18,9 +18,10 @@ def test_artifact_logger_writes_metrics_and_report(tmp_path):
             "eval": {"seed_list": [0, 1]},
             "actor_rollout_ref": {
                 "actor": {"ppo_epochs": 2, "optim": {"lr": 3e-4}},
-                "rollout": {"env_name": "LunarLander-v2"},
+                "rollout": {"env_name": "LunarLander-v3"},
             },
         },
+        reset_existing=True,
     )
 
     logger.log_metrics(
@@ -40,6 +41,7 @@ def test_artifact_logger_writes_metrics_and_report(tmp_path):
     assert (tmp_path / "metrics_history.csv").exists()
     assert (tmp_path / "metrics_summary.json").exists()
     assert (tmp_path / "run_report.md").exists()
+    assert (tmp_path / "run_config_snapshot.json").exists()
 
     summary = json.loads((tmp_path / "metrics_summary.json").read_text(encoding="utf-8"))
     assert summary["final_train_success_rate"] == 0.25
@@ -48,3 +50,4 @@ def test_artifact_logger_writes_metrics_and_report(tmp_path):
     report = (tmp_path / "run_report.md").read_text(encoding="utf-8")
     assert "LunarLander Run Report" in report
     assert "Final validation fuel proxy" in report
+    assert "LunarLander-v3" in report

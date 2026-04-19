@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import tempfile
@@ -47,7 +48,7 @@ def _load_matplotlib():
 class LunarLanderArtifactLogger:
     """Persist structured metrics and render a few high-signal training plots."""
 
-    def __init__(self, output_dir: str | Path, config: dict[str, Any] | None = None):
+    def __init__(self, output_dir: str | Path, config: dict[str, Any] | None = None, reset_existing: bool = False):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.plots_dir = self.output_dir / "plots"
@@ -59,13 +60,42 @@ class LunarLanderArtifactLogger:
         self.config = config or {}
         self.rows: list[dict[str, Any]] = []
         self._csv_fieldnames: set[str] = {"timestamp", "step"}
+        if reset_existing:
+            self._reset_outputs()
         self._write_config_snapshot()
+
+    def _reset_outputs(self):
+        for path in [
+            self.metrics_jsonl_path,
+            self.metrics_csv_path,
+            self.summary_json_path,
+            self.report_path,
+            self.output_dir / "run_config_snapshot.json",
+            self.output_dir / "audit_traces_train.csv",
+            self.output_dir / "audit_traces_train.jsonl",
+            self.output_dir / "audit_traces_val.csv",
+            self.output_dir / "audit_traces_val.jsonl",
+        ]:
+            if path.exists():
+                path.unlink()
+
+        for pattern in ("*.png",):
+            for file_path in self.plots_dir.glob(pattern):
+                file_path.unlink()
+
+        dump_dir = Path(_nested_get(self.config, ["eval", "dump_dir"], self.output_dir / "trajectory_dumps"))
+        if dump_dir.exists():
+            for pattern in ("*.json", "*.png", "*.csv", "*.jsonl"):
+                for file_path in dump_dir.glob(pattern):
+                    file_path.unlink()
 
     def log_metrics(self, step: int, data: dict[str, Any]):
         row = {"timestamp": datetime.now().isoformat(), "step": int(step)}
         for key, value in data.items():
             numeric_value = _safe_float(value)
             row[key] = numeric_value if numeric_value is not None else value
+
+        row.update(self._audit_consistency_metrics(step=int(step), current_row=row))
 
         self.rows.append(row)
         self._csv_fieldnames.update(row.keys())
@@ -82,6 +112,74 @@ class LunarLanderArtifactLogger:
             return
         with (self.output_dir / "run_config_snapshot.json").open("w", encoding="utf-8") as file_obj:
             json.dump(self.config, file_obj, indent=2)
+
+    def _expected_trace_episode_count(self, split: str) -> int:
+        if split == "train":
+            return int(_nested_get(self.config, ["data", "train_batch_size"], 0)) * int(_nested_get(self.config, ["data", "n_samples"], 1))
+        if split == "val":
+            return len(_nested_get(self.config, ["eval", "seed_list"], []))
+        return 0
+
+    def _audit_trace_window_stats(self, split: str, step: int) -> dict[str, float] | None:
+        trace_path = self.output_dir / f"audit_traces_{split}.jsonl"
+        if not trace_path.exists():
+            return None
+
+        episodes: dict[str, dict[str, Any]] = {}
+        with trace_path.open("r", encoding="utf-8") as file_obj:
+            for line in file_obj:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                if int(row.get("global_steps", -1)) != step:
+                    continue
+                episode_id = row["episode_id"]
+                episodes[episode_id] = {
+                    "success": bool(row.get("success", False)),
+                    "terminated": bool(row.get("terminated", False)),
+                    "truncated": bool(row.get("truncated", False)),
+                    "crash": bool(row.get("crash", False)),
+                }
+
+        if not episodes:
+            return None
+
+        values = list(episodes.values())
+        num_episodes = len(values)
+        expected = self._expected_trace_episode_count(split)
+        return {
+            f"audit_trace/{split}_num_episodes": float(num_episodes),
+            f"audit_trace/{split}_success_rate": sum(1.0 if item["success"] else 0.0 for item in values) / num_episodes,
+            f"audit_trace/{split}_terminated_rate": sum(1.0 if item["terminated"] else 0.0 for item in values) / num_episodes,
+            f"audit_trace/{split}_truncated_rate": sum(1.0 if item["truncated"] else 0.0 for item in values) / num_episodes,
+            f"audit_trace/{split}_crash_rate": sum(1.0 if item["crash"] else 0.0 for item in values) / num_episodes,
+            f"audit_trace/{split}_is_full_window": 1.0 if expected > 0 and num_episodes == expected else 0.0,
+        }
+
+    def _audit_consistency_metrics(self, step: int, current_row: dict[str, Any]) -> dict[str, Any]:
+        metrics = {}
+        for split, success_key, crash_key, terminated_key, truncated_key in [
+            ("train", "train_reward/success_rate", "train_reward/crash_rate", "train_reward/terminated_rate", "train_reward/truncated_rate"),
+            ("val", "val/test_reward/success_rate", "val/test_reward/crash_rate", "val/test_reward/terminated_rate", "val/test_reward/truncated_rate"),
+        ]:
+            trace_stats = self._audit_trace_window_stats(split=split, step=step)
+            if trace_stats is None:
+                continue
+            metrics.update(trace_stats)
+            for source_key, trace_key, suffix in [
+                (success_key, f"audit_trace/{split}_success_rate", "success"),
+                (crash_key, f"audit_trace/{split}_crash_rate", "crash"),
+                (terminated_key, f"audit_trace/{split}_terminated_rate", "terminated"),
+                (truncated_key, f"audit_trace/{split}_truncated_rate", "truncated"),
+            ]:
+                source_value = _safe_float(current_row.get(source_key))
+                trace_value = _safe_float(trace_stats.get(trace_key))
+                if source_value is None or trace_value is None:
+                    continue
+                metrics[f"audit_consistency/{split}_{suffix}_abs_diff"] = abs(source_value - trace_value)
+                metrics[f"audit_consistency/{split}_{suffix}_match"] = 1.0 if abs(source_value - trace_value) <= 1e-9 else 0.0
+        return metrics
 
     def _rewrite_csv(self):
         fieldnames = sorted(self._csv_fieldnames, key=lambda item: (item not in {"timestamp", "step"}, item))
@@ -145,6 +243,7 @@ class LunarLanderArtifactLogger:
 
     def _final_summary(self) -> dict[str, Any]:
         summary = {
+            "environment": _nested_get(self.config, ["actor_rollout_ref", "rollout", "env_name"], "LunarLander-v3"),
             "final_train_success_rate": self._latest_value("train_reward/success_rate"),
             "best_train_success_rate": self._peak("train_reward/success_rate"),
             "final_val_success_rate": self._latest_value("val/test_reward/success_rate"),
@@ -199,7 +298,7 @@ class LunarLanderArtifactLogger:
 
 ## Setup
 
-- Environment: `{rollout_cfg.get("env_name", "LunarLander-v2")}`
+- Environment: `{rollout_cfg.get("env_name", "LunarLander-v3")}`
 - Experiment name: `{current_ablation}`
 - Train batch size: `{data_cfg.get("train_batch_size")}`
 - Validation batch size: `{data_cfg.get("val_batch_size")}`
@@ -207,6 +306,7 @@ class LunarLanderArtifactLogger:
 - PPO epochs: `{actor_cfg.get("ppo_epochs")}`
 - Learning rate: `{_nested_get(self.config, ["actor_rollout_ref", "actor", "optim", "lr"])}`
 - Evaluation seeds: `{eval_cfg.get("seed_list", [])}`
+- Eval seed hash: `{hashlib.md5(json.dumps(eval_cfg.get("seed_list", []), sort_keys=True).encode("utf-8")).hexdigest()[:12]}`
 
 ## Reward Definition
 
@@ -214,6 +314,7 @@ class LunarLanderArtifactLogger:
 - Weights: `sub={weights.get("sub")}`, `prog={weights.get("prog")}`, `smooth={weights.get("smooth")}`, `final={weights.get("final")}`
 - Phase thresholds: `{reward_cfg.get("phase_thresholds", {})}`
 - Success thresholds: `{reward_cfg.get("success", {})}`
+- Reward phase thresholds: `{reward_cfg.get("phase_thresholds", {})}`
 
 ## Ablations
 
@@ -240,6 +341,7 @@ class LunarLanderArtifactLogger:
 - Task metrics plot: `plots/task_metrics_train.png`
 - Alignment diagnostics plot: `plots/alignment_diagnostics.png`
 - Trajectory dumps: `trajectory_dumps/`
+- Audit traces: `audit_traces_train.csv`, `audit_traces_val.csv`
 
 ## Interpretation
 

@@ -137,13 +137,19 @@ reward:
   weights:
     sub: 0.10
     prog: 0.30
-    smooth: 0.02
+    smooth: 0.005
     final: 1.00
   phase_thresholds:
-    center_x_abs_for_align: 0.20
+    center_x_abs_for_align: 0.35
+    center_x_abs_for_descend: 0.20
+    center_x_abs_for_touchdown: 0.15
     angle_abs_for_descend: 0.15
+    angle_abs_for_touchdown: 0.10
+    height_for_descend: 0.75
     height_for_touchdown: 0.30
+    horizontal_speed_abs_for_touchdown: 0.20
     vertical_speed_abs_for_touchdown: 0.20
+    vertical_speed_min_for_descend: -0.05
     descent_target_height: 0.50
   coeffs:
     approach_x: 1.0
@@ -172,9 +178,17 @@ reward:
     max_abs_theta: 0.15
 
 eval:
-  seed_list: [0, 1, 2, 3, 4, 5, 6, 7]
+  seed_list: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
   dump_num_trajectories: 2
   dump_dir: ${trainer.default_local_dir}/trajectory_dumps
+
+audit:
+  enabled: true
+  max_train_episodes: 128
+  max_val_episodes: 32
+  trace_csv: true
+  trace_jsonl: true
+  output_dir: ${trainer.default_local_dir}
 
 critic:
   strategy: fsdp

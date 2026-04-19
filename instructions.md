@@ -39,6 +39,7 @@ If you only want LunarLander, this repo can now run without a GPU.
 - GPU: optional; use `NUM_GPUS=1` only on a CUDA machine
 - Default behavior: `examples/run_lunarlander_rl.sh` now runs in CPU mode unless you override `NUM_GPUS`
 - Gymnasium env id: `LunarLander-v3`
+- Default eval protocol: fixed 32-seed deterministic validation
 
 ## Common commands
 
@@ -101,11 +102,16 @@ python3 -m py_compile \
 - The LunarLander worker is intentionally single-process for the first pass.
 - The original OpenVLA/LIBERO/Robotwin paths are still present.
 - Reward shaping for LunarLander is configured in `verl/trainer/config/ppo_trainer.yaml`.
+- The current shaped reward uses explicit thresholds for `APPROACH`, `ALIGN`, `DESCEND`, and `TOUCHDOWN`, a delta-style subgoal term, and one-time progress bonuses per phase.
 - Trajectory dumps and experiment outputs are written under the configured `trainer.default_local_dir`.
 - Metric history is written to `metrics_history.jsonl` and `metrics_history.csv`.
+- Step-level forensic traces are written to `audit_traces_train.csv` / `.jsonl` and `audit_traces_val.csv` / `.jsonl`.
+- The first full audit window now defaults to 128 train episodes and 32 validation episodes, which is enough to compare trace-derived success rates against logged metrics.
+- Metrics now include phase occupancy, phase transitions, weighted component totals, successful-vs-failed reward dominance summaries, and audit consistency checks.
 - Summary plots are written to `plots/`, and evaluation trajectory graphics are written beside the trajectory JSON dumps.
 - Each run also writes `run_report.md`.
 - The suite runner writes a combined markdown report across ablations.
+- Rerunning the same experiment directory resets the local metrics, plots, audit traces, and trajectory dumps for a clean diagnostic record.
 
 ## Suggested workflow
 

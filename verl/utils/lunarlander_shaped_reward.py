@@ -8,7 +8,7 @@ more VLA-like environments.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -38,18 +38,25 @@ ACTION_TO_VECTOR = {
 class LunarLanderRewardState:
     prev_phase: int | None = None
     prev_action: int | None = None
+    visited_phases: set[int] = field(default_factory=set)
 
 
 @dataclass
 class LunarLanderRewardConfig:
     w_sub: float = 0.10
     w_prog: float = 0.30
-    w_smooth: float = 0.02
+    w_smooth: float = 0.005
     w_final: float = 1.00
-    center_x_abs_for_align: float = 0.20
+    center_x_abs_for_align: float = 0.35
+    center_x_abs_for_descend: float = 0.20
+    center_x_abs_for_touchdown: float = 0.15
     angle_abs_for_descend: float = 0.15
+    angle_abs_for_touchdown: float = 0.10
+    height_for_descend: float = 0.75
     height_for_touchdown: float = 0.30
+    horizontal_speed_abs_for_touchdown: float = 0.20
     vertical_speed_abs_for_touchdown: float = 0.20
+    vertical_speed_min_for_descend: float = -0.05
     descent_target_height: float = 0.50
     approach_x: float = 1.0
     approach_vx: float = 0.3
@@ -87,12 +94,18 @@ class LunarLanderRewardConfig:
         return cls(
             w_sub=float(weights.get("sub", 0.10)),
             w_prog=float(weights.get("prog", 0.30)),
-            w_smooth=float(weights.get("smooth", 0.02)),
+            w_smooth=float(weights.get("smooth", 0.005)),
             w_final=float(weights.get("final", 1.00)),
-            center_x_abs_for_align=float(thresholds.get("center_x_abs_for_align", 0.20)),
+            center_x_abs_for_align=float(thresholds.get("center_x_abs_for_align", 0.35)),
+            center_x_abs_for_descend=float(thresholds.get("center_x_abs_for_descend", 0.20)),
+            center_x_abs_for_touchdown=float(thresholds.get("center_x_abs_for_touchdown", 0.15)),
             angle_abs_for_descend=float(thresholds.get("angle_abs_for_descend", 0.15)),
+            angle_abs_for_touchdown=float(thresholds.get("angle_abs_for_touchdown", 0.10)),
+            height_for_descend=float(thresholds.get("height_for_descend", 0.75)),
             height_for_touchdown=float(thresholds.get("height_for_touchdown", 0.30)),
+            horizontal_speed_abs_for_touchdown=float(thresholds.get("horizontal_speed_abs_for_touchdown", 0.20)),
             vertical_speed_abs_for_touchdown=float(thresholds.get("vertical_speed_abs_for_touchdown", 0.20)),
+            vertical_speed_min_for_descend=float(thresholds.get("vertical_speed_min_for_descend", -0.05)),
             descent_target_height=float(thresholds.get("descent_target_height", 0.50)),
             approach_x=float(coeffs.get("approach_x", 1.0)),
             approach_vx=float(coeffs.get("approach_vx", 0.3)),
@@ -135,42 +148,103 @@ def _parse_obs(obs: Any) -> tuple[float, float, float, float, float, float, floa
 
 
 def classify_phase(obs, config: LunarLanderRewardConfig) -> int:
-    x, y, _vx, vy, theta, _omega, left_leg, right_leg = _parse_obs(obs)
+    x, y, vx, vy, theta, _omega, left_leg, right_leg = _parse_obs(obs)
     both_legs = left_leg > 0.5 and right_leg > 0.5
+    near_touchdown_state = (
+        y <= config.height_for_touchdown
+        and abs(x) <= config.center_x_abs_for_touchdown
+        and abs(theta) <= config.angle_abs_for_touchdown
+        and abs(vx) <= config.horizontal_speed_abs_for_touchdown
+        and abs(vy) <= config.vertical_speed_abs_for_touchdown
+    )
+
+    # Order matters: terminal-like phases are strictly narrower than broader approach phases.
     if (
         both_legs
-        or y <= config.height_for_touchdown
-        or (
-            abs(x) <= config.center_x_abs_for_align
-            and abs(theta) <= config.angle_abs_for_descend
-            and abs(vy) <= config.vertical_speed_abs_for_touchdown
-        )
+        or near_touchdown_state
     ):
         return TOUCHDOWN
-    if abs(x) <= config.center_x_abs_for_align and abs(theta) <= config.angle_abs_for_descend:
+    if (
+        y <= config.height_for_descend
+        and abs(x) <= config.center_x_abs_for_descend
+        and abs(theta) <= config.angle_abs_for_descend
+        and vy <= config.vertical_speed_min_for_descend
+    ):
         return DESCEND
     if abs(x) <= config.center_x_abs_for_align:
         return ALIGN
     return APPROACH
 
 
-def compute_subgoal_reward(obs, phase: int, config: LunarLanderRewardConfig) -> float:
+def stabilize_phase(raw_phase: int, prev_phase: int | None) -> int:
+    if prev_phase is None:
+        return int(raw_phase)
+    return int(max(raw_phase, prev_phase))
+
+
+def phase_threshold_dict(config: LunarLanderRewardConfig) -> dict[str, dict[str, float]]:
+    return {
+        "APPROACH": {
+            "abs_x_gt": config.center_x_abs_for_align,
+        },
+        "ALIGN": {
+            "abs_x_lte": config.center_x_abs_for_align,
+            "abs_x_descend_gt": config.center_x_abs_for_descend,
+        },
+        "DESCEND": {
+            "y_lte": config.height_for_descend,
+            "abs_x_lte": config.center_x_abs_for_descend,
+            "abs_theta_lte": config.angle_abs_for_descend,
+            "vy_lte": config.vertical_speed_min_for_descend,
+        },
+        "TOUCHDOWN": {
+            "y_lte": config.height_for_touchdown,
+            "abs_x_lte": config.center_x_abs_for_touchdown,
+            "abs_theta_lte": config.angle_abs_for_touchdown,
+            "abs_vx_lte": config.horizontal_speed_abs_for_touchdown,
+            "abs_vy_lte": config.vertical_speed_abs_for_touchdown,
+        },
+    }
+
+
+def _compute_subgoal_potential(obs, phase: int, config: LunarLanderRewardConfig) -> float:
     x, y, vx, vy, theta, omega, _left_leg, _right_leg = _parse_obs(obs)
     if phase == APPROACH:
-        raw_reward = -(config.approach_x * abs(x) + config.approach_vx * abs(vx))
+        raw_score = -(config.approach_x * abs(x) + config.approach_vx * abs(vx))
     elif phase == ALIGN:
-        raw_reward = -(config.align_x * abs(x) + config.align_theta * abs(theta) + config.align_omega * abs(omega))
+        raw_score = -(config.align_x * abs(x) + config.align_theta * abs(theta) + config.align_omega * abs(omega))
     elif phase == DESCEND:
-        raw_reward = -(config.descend_y * abs(y - config.descent_target_height) + config.descend_vy * abs(vy) + config.descend_x * abs(x))
+        raw_score = -(config.descend_y * abs(y - config.descent_target_height) + config.descend_vy * abs(vy) + config.descend_x * abs(x))
     elif phase == TOUCHDOWN:
-        raw_reward = -(config.touchdown_vx * abs(vx) + config.touchdown_vy * abs(vy) + config.touchdown_theta * abs(theta) + config.touchdown_omega * abs(omega))
+        raw_score = -(config.touchdown_vx * abs(vx) + config.touchdown_vy * abs(vy) + config.touchdown_theta * abs(theta) + config.touchdown_omega * abs(omega))
     else:
         raise ValueError(f"Unknown phase: {phase}")
-    return float(np.clip(raw_reward, config.subgoal_min, config.subgoal_max))
+    return float(np.clip(raw_score, config.subgoal_min, config.subgoal_max))
 
 
-def compute_progress_reward(prev_phase: int | None, phase: int, config: LunarLanderRewardConfig) -> float:
+def compute_subgoal_reward(
+    obs,
+    phase: int,
+    config: LunarLanderRewardConfig,
+    prev_obs=None,
+    prev_phase: int | None = None,
+) -> float:
+    if prev_obs is None or prev_phase is None or prev_phase != phase:
+        return 0.0
+    current_potential = _compute_subgoal_potential(obs, phase, config)
+    prev_potential = _compute_subgoal_potential(prev_obs, phase, config)
+    return float(current_potential - prev_potential)
+
+
+def compute_progress_reward(
+    prev_phase: int | None,
+    phase: int,
+    config: LunarLanderRewardConfig,
+    visited_phases: set[int] | None = None,
+) -> float:
     if prev_phase is None or phase <= prev_phase:
+        return 0.0
+    if visited_phases is not None and phase in visited_phases:
         return 0.0
     progress_rewards = {
         ALIGN: config.enter_align,
@@ -192,7 +266,7 @@ def compute_smoothness_reward(prev_action: int | None, action: int, config: Luna
     return -float(np.square(cur_vec - prev_vec).sum())
 
 
-def _infer_success(obs, info: dict | None, config: LunarLanderRewardConfig) -> bool:
+def infer_success(obs, info: dict | None, config: LunarLanderRewardConfig) -> bool:
     if info is not None:
         for key in ("is_success", "success", "landed"):
             if key in info:
@@ -211,7 +285,7 @@ def _infer_success(obs, info: dict | None, config: LunarLanderRewardConfig) -> b
 def compute_final_reward(obs, terminated: bool, truncated: bool, info: dict | None, config: LunarLanderRewardConfig) -> float:
     if not (terminated or truncated):
         return 0.0
-    return 1.0 if _infer_success(obs, info, config) else 0.0
+    return 1.0 if infer_success(obs, info, config) else 0.0
 
 
 def compute_step_reward(
@@ -225,10 +299,11 @@ def compute_step_reward(
     truncated,
     info,
     config,
+    visited_phases: set[int] | None = None,
 ):
     reward_config = config if isinstance(config, LunarLanderRewardConfig) else LunarLanderRewardConfig.from_config(config)
-    r_sub = compute_subgoal_reward(obs, phase, reward_config)
-    r_prog = compute_progress_reward(prev_phase, phase, reward_config)
+    r_sub = compute_subgoal_reward(obs, phase, reward_config, prev_obs=prev_obs, prev_phase=prev_phase)
+    r_prog = compute_progress_reward(prev_phase, phase, reward_config, visited_phases=visited_phases)
     r_smooth = compute_smoothness_reward(prev_action, action, reward_config)
     r_final = compute_final_reward(obs, terminated, truncated, info, reward_config)
     r_total = reward_config.w_sub * r_sub + reward_config.w_prog * r_prog + reward_config.w_smooth * r_smooth

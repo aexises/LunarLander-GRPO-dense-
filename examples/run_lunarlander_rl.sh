@@ -7,6 +7,9 @@ CKPT_PATH="${CKPT_PATH:-checkpoints}"
 NUM_GPUS="${NUM_GPUS:-0}"
 NUM_NODES="${NUM_NODES:-1}"
 ABLATION="${ABLATION:-full}"
+AUDIT_ENABLED="${AUDIT_ENABLED:-true}"
+AUDIT_MAX_TRAIN_EPISODES="${AUDIT_MAX_TRAIN_EPISODES:-128}"
+AUDIT_MAX_VAL_EPISODES="${AUDIT_MAX_VAL_EPISODES:-32}"
 
 case "$ABLATION" in
   terminal_only)
@@ -20,7 +23,7 @@ case "$ABLATION" in
     REWARD_MODE=lunarlander_shaped
     W_SUB=0.0
     W_PROG=0.0
-    W_SMOOTH=0.02
+    W_SMOOTH=0.005
     W_FINAL=1.0
     ;;
   terminal_sub_prog)
@@ -34,14 +37,14 @@ case "$ABLATION" in
     REWARD_MODE=lunarlander_shaped
     W_SUB=0.10
     W_PROG=0.30
-    W_SMOOTH=0.02
+    W_SMOOTH=0.005
     W_FINAL=1.0
     ;;
   dense_only)
     REWARD_MODE=lunarlander_shaped
     W_SUB=0.10
     W_PROG=0.30
-    W_SMOOTH=0.02
+    W_SMOOTH=0.005
     W_FINAL=0.0
     ;;
   *)
@@ -92,6 +95,9 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   reward.weights.prog=$W_PROG \
   reward.weights.smooth=$W_SMOOTH \
   reward.weights.final=$W_FINAL \
+  audit.enabled=$AUDIT_ENABLED \
+  audit.max_train_episodes=$AUDIT_MAX_TRAIN_EPISODES \
+  audit.max_val_episodes=$AUDIT_MAX_VAL_EPISODES \
   trainer.logger="['console']" \
   trainer.project_name=$PROJECT_NAME \
   trainer.experiment_name="${EXPERIMENT_NAME}_${ABLATION}" \

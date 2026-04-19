@@ -7,6 +7,7 @@ is not intended to be treated as evidence of VLA transfer.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import random
@@ -28,8 +29,10 @@ from verl.utils.lunarlander_logging import write_trajectory_plot
 from verl.utils.lunarlander_shaped_reward import (
     PHASE_NAMES,
     LunarLanderRewardConfig,
+    LunarLanderRewardState,
     classify_phase,
     compute_step_reward,
+    stabilize_phase,
 )
 
 FUEL_PROXY_COST = {
@@ -78,6 +81,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
         torch.manual_seed(seed + self.rank)
         if self.device.type == "cuda":
             torch.cuda.manual_seed_all(seed + self.rank)
+        self._audit_counts = {"train": 0, "val": 0}
 
     def _make_env(self, seed: int | None):
         try:
@@ -171,7 +175,88 @@ class LunarLanderActorRolloutRefWorker(Worker):
             if success_written >= dump_limit and failure_written >= dump_limit:
                 break
 
-    def _rollout_episode(self, seed: int, do_sample: bool, temperature: float) -> dict[str, Any]:
+    def _audit_config(self) -> dict[str, Any]:
+        return dict(self.config.get("audit", {}))
+
+    def _write_audit_traces(self, episodes: list[dict[str, Any]], split: str, global_steps: int):
+        audit_cfg = self._audit_config()
+        if not audit_cfg.get("enabled", False):
+            return
+
+        max_episodes = int(audit_cfg.get(f"max_{split}_episodes", 0))
+        if max_episodes <= 0:
+            return
+
+        remaining = max_episodes - self._audit_counts.get(split, 0)
+        if remaining <= 0:
+            return
+
+        selected = episodes[:remaining]
+        if not selected:
+            return
+
+        output_dir = Path(audit_cfg.get("output_dir", self.config.get("eval", {}).get("dump_dir", ".")))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = output_dir / f"audit_traces_{split}.csv"
+        jsonl_path = output_dir / f"audit_traces_{split}.jsonl"
+
+        fieldnames = [
+            "episode_id",
+            "split",
+            "seed",
+            "step_id",
+            "x",
+            "y",
+            "vx",
+            "vy",
+            "theta",
+            "omega",
+            "left_leg_contact",
+            "right_leg_contact",
+            "action",
+            "prev_action",
+            "phase_prev",
+            "phase_cur",
+            "r_sub_raw",
+            "r_prog_raw",
+            "r_smooth_raw",
+            "r_final_raw",
+            "w_sub_r_sub",
+            "w_prog_r_prog",
+            "w_smooth_r_smooth",
+            "w_final_r_final",
+            "r_total_step",
+            "cumulative_reward",
+            "fuel_proxy",
+            "terminated",
+            "truncated",
+            "crash",
+            "success",
+            "global_steps",
+        ]
+
+        write_csv = bool(audit_cfg.get("trace_csv", True))
+        write_jsonl = bool(audit_cfg.get("trace_jsonl", True))
+
+        if write_csv:
+            csv_exists = csv_path.exists()
+            with csv_path.open("a", encoding="utf-8", newline="") as file_obj:
+                writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
+                if not csv_exists:
+                    writer.writeheader()
+                for episode in selected:
+                    for row in episode["audit_rows"]:
+                        writer.writerow(row)
+
+        if write_jsonl:
+            with jsonl_path.open("a", encoding="utf-8") as file_obj:
+                for episode in selected:
+                    for row in episode["audit_rows"]:
+                        file_obj.write(json.dumps(row) + "\n")
+
+        self._audit_counts[split] = self._audit_counts.get(split, 0) + len(selected)
+
+    def _rollout_episode(self, seed: int, do_sample: bool, temperature: float, split: str, global_steps: int, episode_index: int) -> dict[str, Any]:
         env, obs, _info = self._make_env(seed=seed)
         reward_config = self._reward_config()
         max_steps = int(self.config.rollout.get("max_steps", 400))
@@ -188,12 +273,13 @@ class LunarLanderActorRolloutRefWorker(Worker):
         step_dump = []
         fuel_proxy = 0.0
 
-        prev_action = None
-        prev_phase = None
+        reward_state = LunarLanderRewardState()
         success = False
         crash = False
         terminated = False
         truncated = False
+        cumulative_reward = 0.0
+        episode_id = f"{split}_seed_{seed}_step_{global_steps}_episode_{episode_index}"
 
         for step in range(max_steps):
             obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
@@ -206,18 +292,20 @@ class LunarLanderActorRolloutRefWorker(Worker):
             log_prob = float(dist.log_prob(action_tensor).item())
 
             next_obs, _env_reward, terminated, truncated, info = env.step(action)
-            phase = classify_phase(next_obs, reward_config)
+            raw_phase = classify_phase(next_obs, reward_config)
+            phase = stabilize_phase(raw_phase, reward_state.prev_phase)
             reward_dict = compute_step_reward(
                 obs=next_obs,
                 prev_obs=obs,
                 action=action,
-                prev_action=prev_action,
+                prev_action=reward_state.prev_action,
                 phase=phase,
-                prev_phase=prev_phase,
+                prev_phase=reward_state.prev_phase,
                 terminated=terminated,
                 truncated=truncated,
                 info=info,
                 config=reward_config,
+                visited_phases=reward_state.visited_phases,
             )
 
             observations.append(np.asarray(obs, dtype=np.float32))
@@ -230,27 +318,46 @@ class LunarLanderActorRolloutRefWorker(Worker):
             r_final.append(reward_dict["r_final"])
             r_total.append(reward_dict["r_total"])
             fuel_proxy += FUEL_PROXY_COST.get(action, 0.0)
+            cumulative_reward += reward_dict["r_total"]
+            next_obs_arr = np.asarray(next_obs, dtype=np.float32)
+            weighted_sub = reward_config.w_sub * reward_dict["r_sub"]
+            weighted_prog = reward_config.w_prog * reward_dict["r_prog"]
+            weighted_smooth = reward_config.w_smooth * reward_dict["r_smooth"]
+            weighted_final = reward_config.w_final * reward_dict["r_final"]
             step_dump.append(
                 {
                     "step": step,
                     "phase": PHASE_NAMES[reward_dict["phase"]],
+                    "phase_prev": PHASE_NAMES[reward_state.prev_phase] if reward_state.prev_phase is not None else None,
+                    "phase_cur": PHASE_NAMES[reward_dict["phase"]],
+                    "phase_raw": PHASE_NAMES[raw_phase],
                     "obs": np.asarray(obs, dtype=np.float32).tolist(),
-                    "next_obs": np.asarray(next_obs, dtype=np.float32).tolist(),
+                    "next_obs": next_obs_arr.tolist(),
                     "action": action,
+                    "prev_action": reward_state.prev_action,
                     "reward": {
                         "r_sub": reward_dict["r_sub"],
                         "r_prog": reward_dict["r_prog"],
                         "r_smooth": reward_dict["r_smooth"],
                         "r_final": reward_dict["r_final"],
                         "r_total": reward_dict["r_total"],
+                        "w_sub_r_sub": weighted_sub,
+                        "w_prog_r_prog": weighted_prog,
+                        "w_smooth_r_smooth": weighted_smooth,
+                        "w_final_r_final": weighted_final,
                     },
+                    "cumulative_reward": cumulative_reward,
                     "fuel_proxy": fuel_proxy,
+                    "terminated": bool(terminated),
+                    "truncated": bool(truncated),
+                    "success_flag": bool(reward_dict["success"]),
                 }
             )
 
             obs = next_obs
-            prev_action = action
-            prev_phase = phase
+            reward_state.prev_action = action
+            reward_state.prev_phase = phase
+            reward_state.visited_phases.add(phase)
             success = reward_dict["success"]
             if terminated or truncated:
                 crash = bool(terminated and not success)
@@ -259,9 +366,12 @@ class LunarLanderActorRolloutRefWorker(Worker):
         env.close()
         episode_length = len(actions)
         num_action_switches = int(sum(1 for idx in range(1, episode_length) if actions[idx] != actions[idx - 1]))
+        num_phase_transitions = int(sum(1 for idx in range(1, len(phases)) if phases[idx] != phases[idx - 1]))
         final_obs = np.asarray(obs, dtype=np.float32)
         trajectory_payload = {
             "seed": seed,
+            "split": split,
+            "episode_id": episode_id,
             "reward_config": asdict(reward_config),
             "note": "LunarLander is used here as a reward-plumbing sanity check, not as a VLA benchmark.",
             "steps": step_dump,
@@ -276,9 +386,49 @@ class LunarLanderActorRolloutRefWorker(Worker):
                 "final_vy": float(final_obs[3]),
                 "final_theta": float(final_obs[4]),
                 "num_action_switches": num_action_switches,
+                "num_phase_transitions": num_phase_transitions,
                 "fuel_proxy": fuel_proxy,
             },
         }
+        audit_rows = []
+        for item in step_dump:
+            next_obs_arr = item["next_obs"]
+            audit_rows.append(
+                {
+                    "episode_id": episode_id,
+                    "split": split,
+                    "seed": seed,
+                    "step_id": item["step"],
+                    "x": next_obs_arr[0],
+                    "y": next_obs_arr[1],
+                    "vx": next_obs_arr[2],
+                    "vy": next_obs_arr[3],
+                    "theta": next_obs_arr[4],
+                    "omega": next_obs_arr[5],
+                    "left_leg_contact": next_obs_arr[6],
+                    "right_leg_contact": next_obs_arr[7],
+                    "action": item["action"],
+                    "prev_action": item["prev_action"],
+                    "phase_prev": item["phase_prev"],
+                    "phase_cur": item["phase_cur"],
+                    "r_sub_raw": item["reward"]["r_sub"],
+                    "r_prog_raw": item["reward"]["r_prog"],
+                    "r_smooth_raw": item["reward"]["r_smooth"],
+                    "r_final_raw": item["reward"]["r_final"],
+                    "w_sub_r_sub": item["reward"]["w_sub_r_sub"],
+                    "w_prog_r_prog": item["reward"]["w_prog_r_prog"],
+                    "w_smooth_r_smooth": item["reward"]["w_smooth_r_smooth"],
+                    "w_final_r_final": item["reward"]["w_final_r_final"],
+                    "r_total_step": item["reward"]["r_total"],
+                    "cumulative_reward": item["cumulative_reward"],
+                    "fuel_proxy": item["fuel_proxy"],
+                    "terminated": item["terminated"],
+                    "truncated": item["truncated"],
+                    "crash": crash if item["terminated"] else False,
+                    "success": item["success_flag"],
+                    "global_steps": global_steps,
+                }
+            )
         return {
             "observations": observations,
             "actions": actions,
@@ -292,8 +442,11 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "success": bool(success),
             "complete": bool(success),
             "crash": crash,
+            "terminated": bool(terminated),
+            "truncated": bool(truncated),
             "episode_length": episode_length,
             "num_action_switches": num_action_switches,
+            "num_phase_transitions": num_phase_transitions,
             "fuel_proxy": fuel_proxy,
             "final_x": float(final_obs[0]),
             "final_vx": float(final_obs[2]),
@@ -301,6 +454,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "final_theta": float(final_obs[4]),
             "trajectory_dump": json.dumps(trajectory_payload),
             "trajectory_payload": trajectory_payload,
+            "audit_rows": audit_rows,
         }
 
     def _pad_episodes(self, episodes: list[dict[str, Any]]) -> DataProto:
@@ -325,8 +479,11 @@ class LunarLanderActorRolloutRefWorker(Worker):
         complete = torch.zeros(batch_size, dtype=torch.bool)
         success = torch.zeros(batch_size, dtype=torch.bool)
         crash = torch.zeros(batch_size, dtype=torch.bool)
+        terminated = torch.zeros(batch_size, dtype=torch.bool)
+        truncated = torch.zeros(batch_size, dtype=torch.bool)
         episode_length = torch.zeros(batch_size, dtype=torch.long)
         num_action_switches = torch.zeros(batch_size, dtype=torch.long)
+        num_phase_transitions = torch.zeros(batch_size, dtype=torch.long)
         fuel_proxy = torch.zeros(batch_size, dtype=torch.float32)
         final_x = torch.zeros(batch_size, dtype=torch.float32)
         final_vx = torch.zeros(batch_size, dtype=torch.float32)
@@ -340,8 +497,11 @@ class LunarLanderActorRolloutRefWorker(Worker):
             complete[batch_idx] = episode["complete"]
             success[batch_idx] = episode["success"]
             crash[batch_idx] = episode["crash"]
+            terminated[batch_idx] = episode["terminated"]
+            truncated[batch_idx] = episode["truncated"]
             episode_length[batch_idx] = steps
             num_action_switches[batch_idx] = episode["num_action_switches"]
+            num_phase_transitions[batch_idx] = episode["num_phase_transitions"]
             fuel_proxy[batch_idx] = episode["fuel_proxy"]
             final_x[batch_idx] = episode["final_x"]
             final_vx[batch_idx] = episode["final_vx"]
@@ -393,8 +553,11 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "complete": complete.to(self.device),
             "success": success.to(self.device),
             "crash": crash.to(self.device),
+            "terminated": terminated.to(self.device),
+            "truncated": truncated.to(self.device),
             "episode_length": episode_length.to(self.device),
             "num_action_switches": num_action_switches.to(self.device),
+            "num_phase_transitions": num_phase_transitions.to(self.device),
             "fuel_proxy": fuel_proxy.to(self.device),
             "final_x": final_x.to(self.device),
             "final_vx": final_vx.to(self.device),
@@ -431,12 +594,24 @@ class LunarLanderActorRolloutRefWorker(Worker):
         if meta_info.get("validate", False):
             do_sample = False
 
+        split = "val" if meta_info.get("validate", False) else "train"
+        global_steps = int(meta_info.get("global_steps", 0))
         seeds = prompts.batch["trial_id"].repeat_interleave(n_samples, dim=0).squeeze(-1).tolist()
-        episodes = [self._rollout_episode(int(seed), do_sample=do_sample, temperature=temperature) for seed in seeds]
+        episodes = [
+            self._rollout_episode(
+                int(seed),
+                do_sample=do_sample,
+                temperature=temperature,
+                split=split,
+                global_steps=global_steps,
+                episode_index=episode_index,
+            )
+            for episode_index, seed in enumerate(seeds)
+        ]
 
         if meta_info.get("validate", False):
-            global_steps = int(meta_info.get("global_steps", 0))
             self._write_trajectory_dumps([episode["trajectory_payload"] for episode in episodes], global_steps)
+        self._write_audit_traces(episodes=episodes, split=split, global_steps=global_steps)
 
         return self._pad_episodes(episodes).to("cpu")
 

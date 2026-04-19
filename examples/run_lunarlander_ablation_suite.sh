@@ -4,7 +4,7 @@ set -x
 PROJECT_NAME="${PROJECT_NAME:-SimpleVLA-RL}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-lunarlander_grpo_suite}"
 CKPT_PATH="${CKPT_PATH:-checkpoints}"
-NUM_GPUS="${NUM_GPUS:-1}"
+NUM_GPUS="${NUM_GPUS:-0}"
 NUM_NODES="${NUM_NODES:-1}"
 ABLATIONS="${ABLATIONS:-terminal_only terminal_smooth terminal_sub_prog full dense_only}"
 

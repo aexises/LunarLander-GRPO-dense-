@@ -50,6 +50,7 @@ If you only care about LunarLander, you do not need a GPU.
 - GPU: optional; the LunarLander script now defaults to CPU mode with `NUM_GPUS=0`
 - OS note: `gymnasium[box2d]` must build and import successfully on your machine before training will start
 - Gymnasium note: this repo uses `LunarLander-v3`
+- Default validation now uses a fixed 32-seed deterministic eval set
 
 ### 3. Run LunarLander on this repo only
 
@@ -106,6 +107,10 @@ The LunarLander path is an engineering sanity check only. It is meant to validat
 - decomposed reward logging
 - token/step reward distribution
 - shaped-reward ablations
+- phase-stabilized reward shaping with explicit `APPROACH -> ALIGN -> DESCEND -> TOUCHDOWN` thresholds
+- one-time progress bonuses on first entry into a new phase
+- delta-based subgoal shaping instead of pure state-penalty accumulation
+- audit traces for both train and validation episodes
 
 It is not evidence of VLA transfer or manipulation-task generalization.
 
@@ -130,6 +135,11 @@ LunarLander runs now write local artifacts under `trainer.default_local_dir`, in
 
 - `metrics_history.jsonl`
 - `metrics_history.csv`
+- `audit_traces_train.csv`
+- `audit_traces_train.jsonl`
+- `audit_traces_val.csv`
+- `audit_traces_val.jsonl`
+- `run_config_snapshot.json`
 - `plots/reward_overview.png`
 - `plots/reward_components_train.png`
 - `plots/task_metrics_train.png`
@@ -139,3 +149,11 @@ LunarLander runs now write local artifacts under `trainer.default_local_dir`, in
 - `trajectory_dumps/*.png`
 
 The ablation-suite helper also writes an aggregate report such as `checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_report.md`.
+
+If you rerun the same LunarLander experiment directory, the local metric files, audit traces, plots, and trajectory dumps are reset at the start of the new run so old diagnostics do not get mixed into the new evidence.
+
+The metrics history now also includes:
+
+- phase step counts, phase visit rates, and phase transition counts
+- per-window reward dominance summaries for successful vs failed episodes
+- audit-trace consistency checks comparing traced success/crash rates against logged metrics when a full audit window is captured
