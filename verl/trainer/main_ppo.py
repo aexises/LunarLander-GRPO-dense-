@@ -89,7 +89,10 @@ def _phase_metrics(data: DataProto) -> dict[str, float]:
             count = int((valid == phase_id).sum().item())
             step_counts.append(count)
             visit_counts.append(1.0 if count > 0 else 0.0)
-        metrics[f'phase_steps/{phase_name.lower()}'] = float(sum(step_counts))
+        phase_count = float(sum(step_counts))
+        metrics[f'phase_steps/{phase_name.lower()}'] = phase_count
+        metrics[f'phase_counts/{phase_name.lower()}'] = phase_count
+        metrics[f'phase_episode_counts/{phase_name.lower()}'] = float(sum(visit_counts))
         metrics[f'phase_episode_visits/{phase_name.lower()}'] = float(np.mean(visit_counts)) if visit_counts else 0.0
 
     transition_counts = {}
@@ -121,7 +124,7 @@ def _build_step_reward_tensors(data: DataProto, distribution_mode: str) -> dict[
             raise NotImplementedError("uniform_within_step is reserved for a future extension.")
         raise ValueError(f"Unknown reward distribution mode: {distribution_mode}")
 
-    component_names = ["r_sub", "r_prog", "r_smooth", "r_final", "r_total"]
+    component_names = ["r_sub", "r_prog", "r_micro", "r_smooth", "r_final", "r_total"]
     reward_tensors = {
         name: torch.zeros(response_shape[0], response_shape[1] * response_shape[2], dtype=torch.float32, device=data.batch["responses"].device)
         for name in component_names
@@ -171,27 +174,31 @@ class RobRewardManager():
             finish_step = data.batch['finish_step'].long()
             success = data.batch.get('success', data.batch['complete']).float()
             crash = data.batch.get('crash', torch.zeros_like(success, dtype=torch.bool)).float()
-            terminated = finish_step.gt(0).float()
+            terminated = data.batch.get('terminated', finish_step.gt(0)).float()
             truncated = data.batch.get('truncated', torch.zeros_like(success, dtype=torch.bool)).float()
             episode_total = data.batch['r_total'].sum(dim=1)
             episode_r_sub = data.batch['r_sub'].sum(dim=1)
             episode_r_prog = data.batch['r_prog'].sum(dim=1)
+            episode_r_micro = data.batch.get('r_micro', torch.zeros_like(data.batch['r_prog'])).sum(dim=1)
             episode_r_smooth = data.batch['r_smooth'].sum(dim=1)
             episode_r_final = data.batch['r_final'].sum(dim=1)
             reward_cfg = LunarLanderRewardConfig.from_config(self.config)
             weighted_r_sub = reward_cfg.w_sub * episode_r_sub
             weighted_r_prog = reward_cfg.w_prog * episode_r_prog
+            weighted_r_micro = reward_cfg.w_prog * episode_r_micro
             weighted_r_smooth = reward_cfg.w_smooth * episode_r_smooth
             weighted_r_final = reward_cfg.w_final * episode_r_final
-            contribution_denom = weighted_r_sub.abs() + weighted_r_prog.abs() + weighted_r_smooth.abs() + weighted_r_final.abs()
+            contribution_denom = weighted_r_sub.abs() + weighted_r_prog.abs() + weighted_r_micro.abs() + weighted_r_smooth.abs() + weighted_r_final.abs()
             reward_metrics.update({
                 'mean_total_reward': float(episode_total.mean().item()),
                 'mean_r_sub': float(episode_r_sub.mean().item()),
                 'mean_r_prog': float(episode_r_prog.mean().item()),
+                'mean_r_micro': float(episode_r_micro.mean().item()),
                 'mean_r_smooth': float(episode_r_smooth.mean().item()),
                 'mean_r_final': float(episode_r_final.mean().item()),
                 'mean_weighted_r_sub': float(weighted_r_sub.mean().item()),
                 'mean_weighted_r_prog': float(weighted_r_prog.mean().item()),
+                'mean_weighted_r_micro': float(weighted_r_micro.mean().item()),
                 'mean_weighted_r_smooth': float(weighted_r_smooth.mean().item()),
                 'mean_weighted_r_final': float(weighted_r_final.mean().item()),
                 'success_rate': float(success.mean().item()),
@@ -209,11 +216,17 @@ class RobRewardManager():
                 'corr_total_reward_success': _safe_correlation(episode_total, success),
                 'corr_r_sub_success': _safe_correlation(episode_r_sub, success),
                 'corr_r_prog_success': _safe_correlation(episode_r_prog, success),
+                'corr_r_micro_success': _safe_correlation(episode_r_micro, success),
                 'corr_r_smooth_success': _safe_correlation(episode_r_smooth, success),
                 'share_abs_weighted_r_sub': _component_share(weighted_r_sub, contribution_denom),
                 'share_abs_weighted_r_prog': _component_share(weighted_r_prog, contribution_denom),
+                'share_abs_weighted_r_micro': _component_share(weighted_r_micro, contribution_denom),
                 'share_abs_weighted_r_smooth': _component_share(weighted_r_smooth, contribution_denom),
                 'share_abs_weighted_r_final': _component_share(weighted_r_final, contribution_denom),
+                'episodes_with_approach': float(data.batch.get('approach_visited', torch.zeros_like(success, dtype=torch.bool)).float().sum().item()),
+                'episodes_with_micro_progress/enter_x_corridor_070': float(data.batch.get('received_x_corridor_070', torch.zeros_like(success, dtype=torch.bool)).float().sum().item()),
+                'episodes_with_micro_progress/enter_x_corridor_050': float(data.batch.get('received_x_corridor_050', torch.zeros_like(success, dtype=torch.bool)).float().sum().item()),
+                'episodes_with_micro_progress/enter_x_corridor_035': float(data.batch.get('received_x_corridor_035', torch.zeros_like(success, dtype=torch.bool)).float().sum().item()),
             })
 
             for prefix, mask in {
@@ -226,12 +239,14 @@ class RobRewardManager():
                     f'{prefix}/mean_total_reward': _safe_mean(episode_total[mask]),
                     f'{prefix}/mean_weighted_r_sub': _safe_mean(weighted_r_sub[mask]),
                     f'{prefix}/mean_weighted_r_prog': _safe_mean(weighted_r_prog[mask]),
+                    f'{prefix}/mean_weighted_r_micro': _safe_mean(weighted_r_micro[mask]),
                     f'{prefix}/mean_weighted_r_smooth': _safe_mean(weighted_r_smooth[mask]),
                     f'{prefix}/mean_weighted_r_final': _safe_mean(weighted_r_final[mask]),
                     f'{prefix}/mean_num_action_switches': _safe_mean(data.batch.get('num_action_switches', torch.zeros_like(finish_step)).float()[mask]),
                     f'{prefix}/mean_fuel_proxy': _safe_mean(data.batch.get('fuel_proxy', torch.zeros_like(success)).float()[mask]),
                     f'{prefix}/share_abs_weighted_r_sub': _component_share(weighted_r_sub[mask], contribution_denom[mask]),
                     f'{prefix}/share_abs_weighted_r_prog': _component_share(weighted_r_prog[mask], contribution_denom[mask]),
+                    f'{prefix}/share_abs_weighted_r_micro': _component_share(weighted_r_micro[mask], contribution_denom[mask]),
                     f'{prefix}/share_abs_weighted_r_smooth': _component_share(weighted_r_smooth[mask], contribution_denom[mask]),
                     f'{prefix}/share_abs_weighted_r_final': _component_share(weighted_r_final[mask], contribution_denom[mask]),
                 })

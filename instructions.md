@@ -49,6 +49,14 @@ If you only want LunarLander, this repo can now run without a GPU.
 bash examples/run_lunarlander_rl.sh
 ```
 
+### Run a short implementation-validation pass
+
+```bash
+NUM_GPUS=0 TOTAL_EPOCHS=5 NUM_TRIALS_PER_TASK=128 TRAIN_BATCH_SIZE=16 N_SAMPLES=4 \
+AUDIT_MAX_TRAIN_EPISODES=128 AUDIT_MAX_VAL_EPISODES=32 \
+bash examples/run_lunarlander_rl.sh
+```
+
 ### Force CPU mode on a laptop
 
 ```bash
@@ -102,7 +110,7 @@ python3 -m py_compile \
 - The LunarLander worker is intentionally single-process for the first pass.
 - The original OpenVLA/LIBERO/Robotwin paths are still present.
 - Reward shaping for LunarLander is configured in `verl/trainer/config/ppo_trainer.yaml`.
-- The current shaped reward uses explicit thresholds for `APPROACH`, `ALIGN`, `DESCEND`, and `TOUCHDOWN`, a delta-style subgoal term, and one-time progress bonuses per phase.
+- The current shaped reward uses explicit thresholds for `APPROACH`, `ALIGN`, `DESCEND`, and `TOUCHDOWN`, a delta-style subgoal term, one-time progress bonuses per phase, and default weights `sub=0.15`, `prog=0.45`, `smooth=0.002`, `final=1.0`.
 - Trajectory dumps and experiment outputs are written under the configured `trainer.default_local_dir`.
 - Metric history is written to `metrics_history.jsonl` and `metrics_history.csv`.
 - Step-level forensic traces are written to `audit_traces_train.csv` / `.jsonl` and `audit_traces_val.csv` / `.jsonl`.

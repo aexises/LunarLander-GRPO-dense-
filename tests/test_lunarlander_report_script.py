@@ -37,7 +37,7 @@ def test_report_script_aggregates_runs(tmp_path):
     _write_run(
         run_b,
         "full",
-        {"sub": 0.10, "prog": 0.30, "smooth": 0.02, "final": 1.0},
+        {"sub": 0.15, "prog": 0.45, "smooth": 0.002, "final": 1.0},
         {
             "final_val_success_rate": 0.35,
             "best_val_success_rate": 0.40,
@@ -62,6 +62,7 @@ def test_report_script_aggregates_runs(tmp_path):
 
     report = output_path.read_text(encoding="utf-8")
     assert "LunarLander Reward Sanity Check Report" in report
+    assert "phase-local shaping" in report
     assert "terminal_only" in report
     assert "full" in report
     assert "misalignment warning" in report

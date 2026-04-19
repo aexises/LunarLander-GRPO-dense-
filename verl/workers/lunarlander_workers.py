@@ -27,6 +27,7 @@ from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils.lunarlander_logging import write_trajectory_plot
 from verl.utils.lunarlander_shaped_reward import (
+    APPROACH,
     PHASE_NAMES,
     LunarLanderRewardConfig,
     LunarLanderRewardState,
@@ -219,12 +220,15 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "phase_cur",
             "r_sub_raw",
             "r_prog_raw",
+            "r_micro_raw",
             "r_smooth_raw",
             "r_final_raw",
             "w_sub_r_sub",
             "w_prog_r_prog",
+            "w_prog_r_micro",
             "w_smooth_r_smooth",
             "w_final_r_final",
+            "micro_events",
             "r_total_step",
             "cumulative_reward",
             "fuel_proxy",
@@ -267,6 +271,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
         phases = []
         r_sub = []
         r_prog = []
+        r_micro = []
         r_smooth = []
         r_final = []
         r_total = []
@@ -292,6 +297,9 @@ class LunarLanderActorRolloutRefWorker(Worker):
             log_prob = float(dist.log_prob(action_tensor).item())
 
             next_obs, _env_reward, terminated, truncated, info = env.step(action)
+            forced_truncated = bool(step == max_steps - 1 and not terminated and not truncated)
+            step_terminated = bool(terminated)
+            step_truncated = bool(truncated or forced_truncated)
             raw_phase = classify_phase(next_obs, reward_config)
             phase = stabilize_phase(raw_phase, reward_state.prev_phase)
             reward_dict = compute_step_reward(
@@ -301,11 +309,12 @@ class LunarLanderActorRolloutRefWorker(Worker):
                 prev_action=reward_state.prev_action,
                 phase=phase,
                 prev_phase=reward_state.prev_phase,
-                terminated=terminated,
-                truncated=truncated,
+                terminated=step_terminated,
+                truncated=step_truncated,
                 info=info,
                 config=reward_config,
                 visited_phases=reward_state.visited_phases,
+                visited_micro_progress=reward_state.visited_micro_progress,
             )
 
             observations.append(np.asarray(obs, dtype=np.float32))
@@ -314,6 +323,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             phases.append(reward_dict["phase"])
             r_sub.append(reward_dict["r_sub"])
             r_prog.append(reward_dict["r_prog"])
+            r_micro.append(reward_dict["r_micro"])
             r_smooth.append(reward_dict["r_smooth"])
             r_final.append(reward_dict["r_final"])
             r_total.append(reward_dict["r_total"])
@@ -322,6 +332,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             next_obs_arr = np.asarray(next_obs, dtype=np.float32)
             weighted_sub = reward_config.w_sub * reward_dict["r_sub"]
             weighted_prog = reward_config.w_prog * reward_dict["r_prog"]
+            weighted_micro = reward_config.w_prog * reward_dict["r_micro"]
             weighted_smooth = reward_config.w_smooth * reward_dict["r_smooth"]
             weighted_final = reward_config.w_final * reward_dict["r_final"]
             step_dump.append(
@@ -338,27 +349,33 @@ class LunarLanderActorRolloutRefWorker(Worker):
                     "reward": {
                         "r_sub": reward_dict["r_sub"],
                         "r_prog": reward_dict["r_prog"],
+                        "r_micro": reward_dict["r_micro"],
                         "r_smooth": reward_dict["r_smooth"],
                         "r_final": reward_dict["r_final"],
                         "r_total": reward_dict["r_total"],
                         "w_sub_r_sub": weighted_sub,
                         "w_prog_r_prog": weighted_prog,
+                        "w_prog_r_micro": weighted_micro,
                         "w_smooth_r_smooth": weighted_smooth,
                         "w_final_r_final": weighted_final,
                     },
+                    "micro_events": reward_dict["micro_events"],
                     "cumulative_reward": cumulative_reward,
                     "fuel_proxy": fuel_proxy,
-                    "terminated": bool(terminated),
-                    "truncated": bool(truncated),
-                    "success_flag": bool(reward_dict["success"]),
-                }
-            )
+                        "terminated": step_terminated,
+                        "truncated": step_truncated,
+                        "success_flag": bool(reward_dict["success"]),
+                    }
+                )
 
             obs = next_obs
             reward_state.prev_action = action
             reward_state.prev_phase = phase
             reward_state.visited_phases.add(phase)
+            reward_state.visited_micro_progress.update(reward_dict["micro_events"])
             success = reward_dict["success"]
+            terminated = step_terminated
+            truncated = step_truncated
             if terminated or truncated:
                 crash = bool(terminated and not success)
                 break
@@ -388,6 +405,8 @@ class LunarLanderActorRolloutRefWorker(Worker):
                 "num_action_switches": num_action_switches,
                 "num_phase_transitions": num_phase_transitions,
                 "fuel_proxy": fuel_proxy,
+                "approach_visited": bool(APPROACH in reward_state.visited_phases),
+                "micro_progress_events": sorted(reward_state.visited_micro_progress),
             },
         }
         audit_rows = []
@@ -413,12 +432,15 @@ class LunarLanderActorRolloutRefWorker(Worker):
                     "phase_cur": item["phase_cur"],
                     "r_sub_raw": item["reward"]["r_sub"],
                     "r_prog_raw": item["reward"]["r_prog"],
+                    "r_micro_raw": item["reward"]["r_micro"],
                     "r_smooth_raw": item["reward"]["r_smooth"],
                     "r_final_raw": item["reward"]["r_final"],
                     "w_sub_r_sub": item["reward"]["w_sub_r_sub"],
                     "w_prog_r_prog": item["reward"]["w_prog_r_prog"],
+                    "w_prog_r_micro": item["reward"]["w_prog_r_micro"],
                     "w_smooth_r_smooth": item["reward"]["w_smooth_r_smooth"],
                     "w_final_r_final": item["reward"]["w_final_r_final"],
+                    "micro_events": json.dumps(item["micro_events"]),
                     "r_total_step": item["reward"]["r_total"],
                     "cumulative_reward": item["cumulative_reward"],
                     "fuel_proxy": item["fuel_proxy"],
@@ -436,6 +458,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "phase": phases,
             "r_sub": r_sub,
             "r_prog": r_prog,
+            "r_micro": r_micro,
             "r_smooth": r_smooth,
             "r_final": r_final,
             "r_total": r_total,
@@ -455,6 +478,11 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "trajectory_dump": json.dumps(trajectory_payload),
             "trajectory_payload": trajectory_payload,
             "audit_rows": audit_rows,
+            "micro_progress_events": sorted(reward_state.visited_micro_progress),
+            "received_x_corridor_070": "enter_x_corridor_070" in reward_state.visited_micro_progress,
+            "received_x_corridor_050": "enter_x_corridor_050" in reward_state.visited_micro_progress,
+            "received_x_corridor_035": "enter_x_corridor_035" in reward_state.visited_micro_progress,
+            "approach_visited": APPROACH in reward_state.visited_phases,
         }
 
     def _pad_episodes(self, episodes: list[dict[str, Any]]) -> DataProto:
@@ -471,6 +499,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
         phase = torch.full((batch_size, max_steps), -1, dtype=torch.long)
         r_sub = torch.zeros((batch_size, max_steps), dtype=torch.float32)
         r_prog = torch.zeros((batch_size, max_steps), dtype=torch.float32)
+        r_micro = torch.zeros((batch_size, max_steps), dtype=torch.float32)
         r_smooth = torch.zeros((batch_size, max_steps), dtype=torch.float32)
         r_final = torch.zeros((batch_size, max_steps), dtype=torch.float32)
         r_total = torch.zeros((batch_size, max_steps), dtype=torch.float32)
@@ -489,6 +518,10 @@ class LunarLanderActorRolloutRefWorker(Worker):
         final_vx = torch.zeros(batch_size, dtype=torch.float32)
         final_vy = torch.zeros(batch_size, dtype=torch.float32)
         final_theta = torch.zeros(batch_size, dtype=torch.float32)
+        received_x_corridor_070 = torch.zeros(batch_size, dtype=torch.bool)
+        received_x_corridor_050 = torch.zeros(batch_size, dtype=torch.bool)
+        received_x_corridor_035 = torch.zeros(batch_size, dtype=torch.bool)
+        approach_visited = torch.zeros(batch_size, dtype=torch.bool)
         trajectory_dumps = []
 
         for batch_idx, episode in enumerate(episodes):
@@ -507,6 +540,10 @@ class LunarLanderActorRolloutRefWorker(Worker):
             final_vx[batch_idx] = episode["final_vx"]
             final_vy[batch_idx] = episode["final_vy"]
             final_theta[batch_idx] = episode["final_theta"]
+            received_x_corridor_070[batch_idx] = episode["received_x_corridor_070"]
+            received_x_corridor_050[batch_idx] = episode["received_x_corridor_050"]
+            received_x_corridor_035[batch_idx] = episode["received_x_corridor_035"]
+            approach_visited[batch_idx] = episode["approach_visited"]
             trajectory_dumps.append(episode["trajectory_dump"])
 
             if steps == 0:
@@ -518,6 +555,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             phase_tensor = torch.tensor(np.asarray(episode["phase"], dtype=np.int64))
             r_sub_tensor = torch.tensor(np.asarray(episode["r_sub"], dtype=np.float32))
             r_prog_tensor = torch.tensor(np.asarray(episode["r_prog"], dtype=np.float32))
+            r_micro_tensor = torch.tensor(np.asarray(episode["r_micro"], dtype=np.float32))
             r_smooth_tensor = torch.tensor(np.asarray(episode["r_smooth"], dtype=np.float32))
             r_final_tensor = torch.tensor(np.asarray(episode["r_final"], dtype=np.float32))
             r_total_tensor = torch.tensor(np.asarray(episode["r_total"], dtype=np.float32))
@@ -531,6 +569,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             phase[batch_idx, :steps] = phase_tensor
             r_sub[batch_idx, :steps] = r_sub_tensor
             r_prog[batch_idx, :steps] = r_prog_tensor
+            r_micro[batch_idx, :steps] = r_micro_tensor
             r_smooth[batch_idx, :steps] = r_smooth_tensor
             r_final[batch_idx, :steps] = r_final_tensor
             r_total[batch_idx, :steps] = r_total_tensor
@@ -545,6 +584,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "phase": phase.to(self.device),
             "r_sub": r_sub.to(self.device),
             "r_prog": r_prog.to(self.device),
+            "r_micro": r_micro.to(self.device),
             "r_smooth": r_smooth.to(self.device),
             "r_final": r_final.to(self.device),
             "r_total": r_total.to(self.device),
@@ -563,6 +603,10 @@ class LunarLanderActorRolloutRefWorker(Worker):
             "final_vx": final_vx.to(self.device),
             "final_vy": final_vy.to(self.device),
             "final_theta": final_theta.to(self.device),
+            "received_x_corridor_070": received_x_corridor_070.to(self.device),
+            "received_x_corridor_050": received_x_corridor_050.to(self.device),
+            "received_x_corridor_035": received_x_corridor_035.to(self.device),
+            "approach_visited": approach_visited.to(self.device),
         }
         return DataProto.from_dict(tensors=tensors, non_tensors={"trajectory_dump": trajectory_dumps})
 

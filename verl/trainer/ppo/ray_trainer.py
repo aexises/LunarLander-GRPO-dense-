@@ -253,6 +253,7 @@ def compute_data_metrics(batch,config):
             'critic/reward_components/mean_total_reward': batch.batch['r_total'].sum(dim=-1).mean().detach().item(),
             'critic/reward_components/mean_r_sub': batch.batch['r_sub'].sum(dim=-1).mean().detach().item(),
             'critic/reward_components/mean_r_prog': batch.batch['r_prog'].sum(dim=-1).mean().detach().item(),
+            'critic/reward_components/mean_r_micro': batch.batch.get('r_micro', torch.zeros_like(batch.batch['r_prog'])).sum(dim=-1).mean().detach().item(),
             'critic/reward_components/mean_r_smooth': batch.batch['r_smooth'].sum(dim=-1).mean().detach().item(),
             'critic/reward_components/mean_r_final': batch.batch['r_final'].sum(dim=-1).mean().detach().item(),
             'critic/task/success_rate': success.mean().detach().item(),
@@ -348,10 +349,12 @@ class RayTrainer(object):
                                            shuffle=True,
                                            drop_last=True,
                                            collate_fn=collate_fn))
+        val_shuffle = False if self.config.data.task_suite_name == "lunarlander" else True
+        val_drop_last = False if self.config.data.task_suite_name == "lunarlander" else True
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
                                          batch_size=self.config.data.val_batch_size,
-                                         shuffle=True,
-                                         drop_last=True,
+                                         shuffle=val_shuffle,
+                                         drop_last=val_drop_last,
                                          collate_fn=collate_fn)
 
         assert len(self.train_dataloader) >= 1
@@ -424,6 +427,8 @@ class RayTrainer(object):
 
         metric_dict[f'test_score/all'] = reward_tensor.mean().item()
         metric_dict['test_meta/num_eval_episodes'] = int(reward_tensor.shape[0])
+        metric_dict['test_meta/num_eval_seeds_configured'] = int(len(eval_seed_list))
+        metric_dict['test_meta/eval_full_seed_coverage'] = 1.0 if int(reward_tensor.shape[0]) == int(len(eval_seed_list)) else 0.0
         metric_dict['test_meta/eval_seed_hash'] = hashlib.md5(json.dumps(eval_seed_list).encode("utf-8")).hexdigest()[:12]
         metric_dict['test_meta/deterministic_eval'] = 1.0 if deterministic_eval else 0.0
         metric_dict['test_meta/eval_seed_list'] = json.dumps(eval_seed_list)

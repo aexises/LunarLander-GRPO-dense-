@@ -234,6 +234,14 @@ class LunarLanderArtifactLogger:
                 return value
         return None
 
+    def _latest_logged_value(self, metric_name: str):
+        for row in reversed(self.rows):
+            value = row.get(metric_name)
+            if value is None:
+                continue
+            return value
+        return None
+
     def _peak_value(self, metric_name: str):
         values = [value for _, value in [self._series(metric_name)] if False]
         xs, ys = self._series(metric_name)
@@ -253,6 +261,54 @@ class LunarLanderArtifactLogger:
             "final_train_fuel_proxy": self._latest_value("train_reward/mean_fuel_proxy"),
             "final_val_fuel_proxy": self._latest_value("val/test_reward/mean_fuel_proxy"),
             "final_reward_hacking_warning": self._latest_value("diagnostics/reward_hacking_warning"),
+            "final_train_phase_counts": {
+                phase: self._latest_value(f"train_reward/phase_counts/{phase}")
+                for phase in ("approach", "align", "descend", "touchdown")
+            },
+            "final_train_phase_episode_counts": {
+                phase: self._latest_value(f"train_reward/phase_episode_counts/{phase}")
+                for phase in ("approach", "align", "descend", "touchdown")
+            },
+            "final_val_phase_counts": {
+                phase: self._latest_value(f"val/test_reward/phase_counts/{phase}")
+                for phase in ("approach", "align", "descend", "touchdown")
+            },
+            "final_val_phase_episode_counts": {
+                phase: self._latest_value(f"val/test_reward/phase_episode_counts/{phase}")
+                for phase in ("approach", "align", "descend", "touchdown")
+            },
+            "final_train_num_phase_transitions": self._latest_value("train_reward/mean_num_phase_transitions"),
+            "final_val_num_phase_transitions": self._latest_value("val/test_reward/mean_num_phase_transitions"),
+            "final_train_micro_progress_counts": {
+                "enter_x_corridor_070": self._latest_value("train_reward/episodes_with_micro_progress/enter_x_corridor_070"),
+                "enter_x_corridor_050": self._latest_value("train_reward/episodes_with_micro_progress/enter_x_corridor_050"),
+                "enter_x_corridor_035": self._latest_value("train_reward/episodes_with_micro_progress/enter_x_corridor_035"),
+            },
+            "final_val_micro_progress_counts": {
+                "enter_x_corridor_070": self._latest_value("val/test_reward/episodes_with_micro_progress/enter_x_corridor_070"),
+                "enter_x_corridor_050": self._latest_value("val/test_reward/episodes_with_micro_progress/enter_x_corridor_050"),
+                "enter_x_corridor_035": self._latest_value("val/test_reward/episodes_with_micro_progress/enter_x_corridor_035"),
+            },
+            "final_train_reward_shares": {
+                "subgoal": self._latest_value("train_reward/share_abs_weighted_r_sub"),
+                "progress": self._latest_value("train_reward/share_abs_weighted_r_prog"),
+                "micro_progress": self._latest_value("train_reward/share_abs_weighted_r_micro"),
+                "smoothness": self._latest_value("train_reward/share_abs_weighted_r_smooth"),
+                "final": self._latest_value("train_reward/share_abs_weighted_r_final"),
+            },
+            "final_val_reward_shares": {
+                "subgoal": self._latest_value("val/test_reward/share_abs_weighted_r_sub"),
+                "progress": self._latest_value("val/test_reward/share_abs_weighted_r_prog"),
+                "micro_progress": self._latest_value("val/test_reward/share_abs_weighted_r_micro"),
+                "smoothness": self._latest_value("val/test_reward/share_abs_weighted_r_smooth"),
+                "final": self._latest_value("val/test_reward/share_abs_weighted_r_final"),
+            },
+            "final_val_num_eval_episodes": self._latest_value("val/test_meta/num_eval_episodes"),
+            "final_eval_num_seeds_configured": self._latest_value("val/test_meta/num_eval_seeds_configured"),
+            "final_eval_full_seed_coverage": self._latest_value("val/test_meta/eval_full_seed_coverage"),
+            "final_eval_seed_hash": self._latest_logged_value("val/test_meta/eval_seed_hash"),
+            "final_eval_seed_list": self._latest_logged_value("val/test_meta/eval_seed_list"),
+            "final_eval_deterministic": self._latest_value("val/test_meta/deterministic_eval"),
         }
         with self.summary_json_path.open("w", encoding="utf-8") as file_obj:
             json.dump(summary, file_obj, indent=2)
@@ -307,14 +363,19 @@ class LunarLanderArtifactLogger:
 - Learning rate: `{_nested_get(self.config, ["actor_rollout_ref", "actor", "optim", "lr"])}`
 - Evaluation seeds: `{eval_cfg.get("seed_list", [])}`
 - Eval seed hash: `{hashlib.md5(json.dumps(eval_cfg.get("seed_list", []), sort_keys=True).encode("utf-8")).hexdigest()[:12]}`
+- Deterministic eval: `{summary.get("final_eval_deterministic")}`
+- Evaluated episodes per validation window: `{summary.get("final_val_num_eval_episodes")}`
 
 ## Reward Definition
 
-- Total reward: `w_sub * r_sub + w_prog * r_prog + w_smooth * r_smooth + w_final * r_final_terminal_only`
+- Total reward: `w_sub * r_sub + w_prog * (r_prog + r_micro) + w_smooth * r_smooth + w_final * r_final_terminal_only`
 - Weights: `sub={weights.get("sub")}`, `prog={weights.get("prog")}`, `smooth={weights.get("smooth")}`, `final={weights.get("final")}`
+- Subgoal reward: `clip(f(s_(t-1)) - f(s_t), -1, 1)` with phase-local error functions
+- Progress reward: first-entry phase bonuses plus one-time micro-progress corridor bonuses
+- Subgoal settings: `{reward_cfg.get("subgoal", {})}`
+- Smoothness reward: `{reward_cfg.get("smoothness", {})}`
 - Phase thresholds: `{reward_cfg.get("phase_thresholds", {})}`
 - Success thresholds: `{reward_cfg.get("success", {})}`
-- Reward phase thresholds: `{reward_cfg.get("phase_thresholds", {})}`
 
 ## Ablations
 
@@ -336,6 +397,17 @@ class LunarLanderArtifactLogger:
 - Final validation total reward: `{summary.get("final_val_total_reward")}`
 - Final train fuel proxy: `{summary.get("final_train_fuel_proxy")}`
 - Final validation fuel proxy: `{summary.get("final_val_fuel_proxy")}`
+- Final train phase counts: `{summary.get("final_train_phase_counts")}`
+- Final train phase episode counts: `{summary.get("final_train_phase_episode_counts")}`
+- Final validation phase counts: `{summary.get("final_val_phase_counts")}`
+- Final validation phase episode counts: `{summary.get("final_val_phase_episode_counts")}`
+- Final train mean phase transitions: `{summary.get("final_train_num_phase_transitions")}`
+- Final validation mean phase transitions: `{summary.get("final_val_num_phase_transitions")}`
+- Final train micro-progress counts: `{summary.get("final_train_micro_progress_counts")}`
+- Final validation micro-progress counts: `{summary.get("final_val_micro_progress_counts")}`
+- Final train reward shares: `{summary.get("final_train_reward_shares")}`
+- Final validation reward shares: `{summary.get("final_val_reward_shares")}`
+- Validation seed coverage: `{summary.get("final_val_num_eval_episodes")}` / `{summary.get("final_eval_num_seeds_configured")}` episodes, full coverage=`{summary.get("final_eval_full_seed_coverage")}`
 - Reward overview plot: `plots/reward_overview.png`
 - Reward component plot: `plots/reward_components_train.png`
 - Task metrics plot: `plots/task_metrics_train.png`
@@ -366,6 +438,7 @@ class LunarLanderArtifactLogger:
             specs=[
                 ("train_reward/mean_r_sub", "Subgoal"),
                 ("train_reward/mean_r_prog", "Progress"),
+                ("train_reward/mean_r_micro", "Micro-Progress"),
                 ("train_reward/mean_r_smooth", "Smoothness"),
                 ("train_reward/mean_r_final", "Final"),
             ],
@@ -389,6 +462,7 @@ class LunarLanderArtifactLogger:
                 ("train_reward/corr_total_reward_success", "Corr Total Reward / Success"),
                 ("train_reward/corr_r_sub_success", "Corr Subgoal / Success"),
                 ("train_reward/corr_r_prog_success", "Corr Progress / Success"),
+                ("train_reward/corr_r_micro_success", "Corr Micro-Progress / Success"),
                 ("train_reward/corr_r_smooth_success", "Corr Smoothness / Success"),
             ],
             title="Reward Alignment Diagnostics",
@@ -425,6 +499,7 @@ def write_trajectory_plot(payload: dict[str, Any], output_path: str | Path):
     r_total = [item["reward"]["r_total"] for item in steps]
     r_sub = [item["reward"]["r_sub"] for item in steps]
     r_prog = [item["reward"]["r_prog"] for item in steps]
+    r_micro = [item["reward"].get("r_micro", 0.0) for item in steps]
     r_smooth = [item["reward"]["r_smooth"] for item in steps]
     unique_phases = list(dict.fromkeys(phases))
     phase_to_idx = {label: idx for idx, label in enumerate(unique_phases)}
@@ -449,6 +524,7 @@ def write_trajectory_plot(payload: dict[str, Any], output_path: str | Path):
     axes[1, 0].plot(step_ids, r_total, label="r_total")
     axes[1, 0].plot(step_ids, r_sub, label="r_sub")
     axes[1, 0].plot(step_ids, r_prog, label="r_prog")
+    axes[1, 0].plot(step_ids, r_micro, label="r_micro")
     axes[1, 0].plot(step_ids, r_smooth, label="r_smooth")
     axes[1, 0].set_title("Reward Decomposition")
     axes[1, 0].set_xlabel("Step")

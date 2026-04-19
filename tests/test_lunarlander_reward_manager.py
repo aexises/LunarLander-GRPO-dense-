@@ -50,9 +50,10 @@ def test_shaped_mode_maps_per_step_rewards_to_step_token_ends():
             "step_token_ends": torch.tensor([[0, 1, 2, 3]], dtype=torch.long),
             "r_sub": torch.tensor([[0.1, 0.2, 0.3, 0.0]], dtype=torch.float32),
             "r_prog": torch.tensor([[0.0, 0.25, 0.0, 0.0]], dtype=torch.float32),
+            "r_micro": torch.tensor([[0.0, 0.05, 0.0, 0.0]], dtype=torch.float32),
             "r_smooth": torch.tensor([[0.0, -0.1, -0.2, 0.0]], dtype=torch.float32),
             "r_final": torch.tensor([[0.0, 0.0, 1.0, 0.0]], dtype=torch.float32),
-            "r_total": torch.tensor([[0.1, 0.35, 1.1, 0.0]], dtype=torch.float32),
+            "r_total": torch.tensor([[0.1, 0.40, 1.1, 0.0]], dtype=torch.float32),
             "crash": torch.tensor([False]),
             "episode_length": torch.tensor([3]),
             "num_action_switches": torch.tensor([1]),
@@ -64,9 +65,10 @@ def test_shaped_mode_maps_per_step_rewards_to_step_token_ends():
     )
     reward_tensors, metrics = manager(proto)
     assert reward_tensors["all"].shape == (1, 4)
-    assert torch.allclose(reward_tensors["all"][0, :3], torch.tensor([0.1, 0.35, 1.1]))
+    assert torch.allclose(reward_tensors["all"][0, :3], torch.tensor([0.1, 0.40, 1.1]))
     assert reward_tensors["gt_scores"][0, 2].item() == 1.0
     assert metrics["success_rate"] == 1.0
+    assert metrics["terminated_rate"] == 1.0
 
 
 def test_shaped_reward_smoke_path_keeps_advantage_shapes():
@@ -82,9 +84,10 @@ def test_shaped_reward_smoke_path_keeps_advantage_shapes():
             "step_token_ends": torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long),
             "r_sub": torch.tensor([[0.1, 0.2, 0.3, 0.1], [0.0, 0.1, 0.0, 0.1]], dtype=torch.float32),
             "r_prog": torch.tensor([[0.0, 0.25, 0.0, 0.0], [0.0, 0.25, 0.0, 0.0]], dtype=torch.float32),
+            "r_micro": torch.tensor([[0.0, 0.05, 0.0, 0.0], [0.0, 0.0, 0.08, 0.0]], dtype=torch.float32),
             "r_smooth": torch.tensor([[0.0, -0.1, -0.2, 0.0], [0.0, -0.1, 0.0, -0.1]], dtype=torch.float32),
             "r_final": torch.tensor([[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
-            "r_total": torch.tensor([[0.1, 0.35, 0.1, 1.0], [0.0, 0.25, 0.0, 0.0]], dtype=torch.float32),
+            "r_total": torch.tensor([[0.1, 0.40, 0.1, 1.0], [0.0, 0.25, 0.08, 0.0]], dtype=torch.float32),
             "old_log_probs": torch.zeros((2, 4), dtype=torch.float32),
             "crash": torch.tensor([False, True]),
             "episode_length": torch.tensor([4, 4]),
@@ -93,6 +96,10 @@ def test_shaped_reward_smoke_path_keeps_advantage_shapes():
             "final_vx": torch.tensor([0.0, 0.5]),
             "final_vy": torch.tensor([0.0, 0.5]),
             "final_theta": torch.tensor([0.0, 0.5]),
+            "received_x_corridor_070": torch.tensor([True, True]),
+            "received_x_corridor_050": torch.tensor([True, True]),
+            "received_x_corridor_035": torch.tensor([False, True]),
+            "approach_visited": torch.tensor([True, True]),
         },
         non_tensors={"uid": np.array(["shared", "shared"], dtype=object)},
     )
@@ -109,3 +116,36 @@ def test_shaped_reward_smoke_path_keeps_advantage_shapes():
     assert proto.batch["token_level_rewards"].shape == (2, 4)
     assert proto.batch["advantages"].shape == (2, 4)
     assert proto.batch["returns"].shape == (2, 4)
+
+
+def test_terminated_rate_uses_explicit_episode_flag_when_present():
+    config = _base_config()
+    config.reward.mode = "lunarlander_shaped"
+    manager = RobRewardManager(num_examine=0, config=config)
+    proto = DataProto.from_dict(
+        tensors={
+            "responses": torch.zeros((2, 4, 1), dtype=torch.long),
+            "finish_step": torch.tensor([4, 4], dtype=torch.long),
+            "complete": torch.tensor([False, False]),
+            "success": torch.tensor([False, False]),
+            "terminated": torch.tensor([True, False]),
+            "truncated": torch.tensor([False, True]),
+            "step_token_ends": torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long),
+            "r_sub": torch.zeros((2, 4), dtype=torch.float32),
+            "r_prog": torch.zeros((2, 4), dtype=torch.float32),
+            "r_micro": torch.zeros((2, 4), dtype=torch.float32),
+            "r_smooth": torch.zeros((2, 4), dtype=torch.float32),
+            "r_final": torch.zeros((2, 4), dtype=torch.float32),
+            "r_total": torch.zeros((2, 4), dtype=torch.float32),
+            "crash": torch.tensor([True, False]),
+            "episode_length": torch.tensor([4, 4]),
+            "num_action_switches": torch.tensor([1, 2]),
+            "final_x": torch.tensor([0.0, 0.5]),
+            "final_vx": torch.tensor([0.0, 0.5]),
+            "final_vy": torch.tensor([0.0, 0.5]),
+            "final_theta": torch.tensor([0.0, 0.5]),
+        }
+    )
+    _reward_tensors, metrics = manager(proto)
+    assert metrics["terminated_rate"] == 0.5
+    assert metrics["truncated_rate"] == 0.5

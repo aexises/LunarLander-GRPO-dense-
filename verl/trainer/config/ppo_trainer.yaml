@@ -130,7 +130,7 @@ actor_rollout_ref:
     n: 1 # > 1 for grpo
 
 reward:
-  mode: terminal_only
+  mode: lunarlander_shaped
   distribution_mode: last_token_per_step
   subgoal_min: -1.0
   subgoal_max: 0.0

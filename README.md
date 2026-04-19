@@ -60,6 +60,14 @@ CPU-only default:
 bash examples/run_lunarlander_rl.sh
 ```
 
+Short implementation-validation run on a laptop:
+
+```bash
+NUM_GPUS=0 TOTAL_EPOCHS=5 NUM_TRIALS_PER_TASK=128 TRAIN_BATCH_SIZE=16 N_SAMPLES=4 \
+AUDIT_MAX_TRAIN_EPISODES=128 AUDIT_MAX_VAL_EPISODES=32 \
+bash examples/run_lunarlander_rl.sh
+```
+
 Explicit CPU mode:
 
 ```bash
@@ -110,6 +118,7 @@ The LunarLander path is an engineering sanity check only. It is meant to validat
 - phase-stabilized reward shaping with explicit `APPROACH -> ALIGN -> DESCEND -> TOUCHDOWN` thresholds
 - one-time progress bonuses on first entry into a new phase
 - delta-based subgoal shaping instead of pure state-penalty accumulation
+- current default shaped-reward weights of `sub=0.15`, `prog=0.45`, `smooth=0.002`, `final=1.0`
 - audit traces for both train and validation episodes
 
 It is not evidence of VLA transfer or manipulation-task generalization.

@@ -39,6 +39,7 @@ class LunarLanderRewardState:
     prev_phase: int | None = None
     prev_action: int | None = None
     visited_phases: set[int] = field(default_factory=set)
+    visited_micro_progress: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -73,6 +74,9 @@ class LunarLanderRewardConfig:
     enter_align: float = 0.25
     enter_descend: float = 0.25
     enter_touchdown: float = 0.25
+    enter_x_corridor_070: float = 0.0
+    enter_x_corridor_050: float = 0.0
+    enter_x_corridor_035: float = 0.0
     smoothness_mode: str = "vector_l2"
     switch_penalty: float = 0.10
     subgoal_min: float = -1.0
@@ -89,6 +93,7 @@ class LunarLanderRewardConfig:
         thresholds = reward_cfg.get("phase_thresholds", {})
         coeffs = reward_cfg.get("coeffs", {})
         progress = reward_cfg.get("progress_rewards", {})
+        micro_progress = reward_cfg.get("micro_progress_rewards", {})
         smoothness = reward_cfg.get("smoothness", {})
         success = reward_cfg.get("success", {})
         return cls(
@@ -122,6 +127,9 @@ class LunarLanderRewardConfig:
             enter_align=float(progress.get("enter_align", 0.25)),
             enter_descend=float(progress.get("enter_descend", 0.25)),
             enter_touchdown=float(progress.get("enter_touchdown", 0.25)),
+            enter_x_corridor_070=float(micro_progress.get("enter_x_corridor_070", 0.0)),
+            enter_x_corridor_050=float(micro_progress.get("enter_x_corridor_050", 0.0)),
+            enter_x_corridor_035=float(micro_progress.get("enter_x_corridor_035", 0.0)),
             smoothness_mode=str(smoothness.get("mode", "vector_l2")),
             switch_penalty=float(smoothness.get("switch_penalty", 0.10)),
             subgoal_min=float(reward_cfg.get("subgoal_min", -1.0)),
@@ -159,10 +167,7 @@ def classify_phase(obs, config: LunarLanderRewardConfig) -> int:
     )
 
     # Order matters: terminal-like phases are strictly narrower than broader approach phases.
-    if (
-        both_legs
-        or near_touchdown_state
-    ):
+    if both_legs or near_touchdown_state:
         return TOUCHDOWN
     if (
         y <= config.height_for_descend
@@ -254,6 +259,40 @@ def compute_progress_reward(
     return float(progress_rewards.get(phase, 0.0))
 
 
+def compute_micro_progress_reward(
+    obs,
+    prev_obs,
+    phase: int,
+    config: LunarLanderRewardConfig,
+    visited_micro_progress: set[str] | None = None,
+) -> tuple[float, list[str]]:
+    if phase != APPROACH:
+        return 0.0, []
+    if prev_obs is None:
+        return 0.0, []
+    x, _y, _vx, _vy, _theta, _omega, _left_leg, _right_leg = _parse_obs(obs)
+    prev_x, _prev_y, _prev_vx, _prev_vy, _prev_theta, _prev_omega, _prev_left_leg, _prev_right_leg = _parse_obs(prev_obs)
+    abs_x = abs(x)
+    prev_abs_x = abs(prev_x)
+    reward = 0.0
+    triggered_events: list[str] = []
+    thresholds = [
+        ("enter_x_corridor_070", 0.70, config.enter_x_corridor_070),
+        ("enter_x_corridor_050", 0.50, config.enter_x_corridor_050),
+        ("enter_x_corridor_035", 0.35, config.enter_x_corridor_035),
+    ]
+    for event_name, threshold, event_reward in thresholds:
+        if event_reward <= 0.0:
+            continue
+        if abs_x >= threshold or prev_abs_x < threshold:
+            continue
+        if visited_micro_progress is not None and event_name in visited_micro_progress:
+            continue
+        triggered_events.append(event_name)
+        reward += float(event_reward)
+    return float(reward), triggered_events
+
+
 def compute_smoothness_reward(prev_action: int | None, action: int, config: LunarLanderRewardConfig) -> float:
     if prev_action is None:
         return 0.0
@@ -300,22 +339,36 @@ def compute_step_reward(
     info,
     config,
     visited_phases: set[int] | None = None,
+    visited_micro_progress: set[str] | None = None,
 ):
     reward_config = config if isinstance(config, LunarLanderRewardConfig) else LunarLanderRewardConfig.from_config(config)
     r_sub = compute_subgoal_reward(obs, phase, reward_config, prev_obs=prev_obs, prev_phase=prev_phase)
     r_prog = compute_progress_reward(prev_phase, phase, reward_config, visited_phases=visited_phases)
+    r_micro, micro_events = compute_micro_progress_reward(
+        obs,
+        prev_obs,
+        phase,
+        reward_config,
+        visited_micro_progress=visited_micro_progress,
+    )
     r_smooth = compute_smoothness_reward(prev_action, action, reward_config)
     r_final = compute_final_reward(obs, terminated, truncated, info, reward_config)
-    r_total = reward_config.w_sub * r_sub + reward_config.w_prog * r_prog + reward_config.w_smooth * r_smooth
+    r_total = (
+        reward_config.w_sub * r_sub
+        + reward_config.w_prog * (r_prog + r_micro)
+        + reward_config.w_smooth * r_smooth
+    )
     if terminated or truncated:
         r_total += reward_config.w_final * r_final
     success = bool(r_final > 0.0)
     return {
         "r_sub": float(r_sub),
         "r_prog": float(r_prog),
+        "r_micro": float(r_micro),
         "r_smooth": float(r_smooth),
         "r_final": float(r_final),
         "r_total": float(r_total),
         "phase": int(phase),
+        "micro_events": micro_events,
         "success": success,
     }
