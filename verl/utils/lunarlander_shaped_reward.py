@@ -305,26 +305,34 @@ def compute_smoothness_reward(prev_action: int | None, action: int, config: Luna
     return -float(np.square(cur_vec - prev_vec).sum())
 
 
-def infer_success(obs, info: dict | None, config: LunarLanderRewardConfig) -> bool:
+def infer_success(
+    obs,
+    info: dict | None,
+    config: LunarLanderRewardConfig,
+    episode_return: float | None = None,
+) -> bool:
     if info is not None:
         for key in ("is_success", "success", "landed"):
             if key in info:
                 return bool(info[key])
-    x, _y, vx, vy, theta, _omega, left_leg, right_leg = _parse_obs(obs)
-    both_legs = left_leg > 0.5 and right_leg > 0.5
-    return bool(
-        both_legs
-        and abs(x) <= config.max_abs_x
-        and abs(vx) <= config.max_abs_vx
-        and abs(vy) <= config.max_abs_vy
-        and abs(theta) <= config.max_abs_theta
-    )
+    if episode_return is not None:
+        # Match the AC-GRPO LunarLander baseline: if the environment does not
+        # expose an explicit success flag, use full-episode return semantics.
+        return bool(float(episode_return) >= 200.0)
+    return False
 
 
-def compute_final_reward(obs, terminated: bool, truncated: bool, info: dict | None, config: LunarLanderRewardConfig) -> float:
+def compute_final_reward(
+    obs,
+    terminated: bool,
+    truncated: bool,
+    info: dict | None,
+    config: LunarLanderRewardConfig,
+    episode_return: float | None = None,
+) -> float:
     if not (terminated or truncated):
         return 0.0
-    return 1.0 if infer_success(obs, info, config) else 0.0
+    return 1.0 if infer_success(obs, info, config, episode_return=episode_return) else 0.0
 
 
 def compute_step_reward(
@@ -340,6 +348,7 @@ def compute_step_reward(
     config,
     visited_phases: set[int] | None = None,
     visited_micro_progress: set[str] | None = None,
+    episode_return: float | None = None,
 ):
     reward_config = config if isinstance(config, LunarLanderRewardConfig) else LunarLanderRewardConfig.from_config(config)
     r_sub = compute_subgoal_reward(obs, phase, reward_config, prev_obs=prev_obs, prev_phase=prev_phase)
@@ -352,7 +361,14 @@ def compute_step_reward(
         visited_micro_progress=visited_micro_progress,
     )
     r_smooth = compute_smoothness_reward(prev_action, action, reward_config)
-    r_final = compute_final_reward(obs, terminated, truncated, info, reward_config)
+    r_final = compute_final_reward(
+        obs,
+        terminated,
+        truncated,
+        info,
+        reward_config,
+        episode_return=episode_return,
+    )
     r_total = (
         reward_config.w_sub * r_sub
         + reward_config.w_prog * (r_prog + r_micro)

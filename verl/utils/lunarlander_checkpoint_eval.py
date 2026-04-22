@@ -253,16 +253,18 @@ def evaluate_saved_checkpoint(run_dir: Path, selection: CheckpointSelection) -> 
         truncated = False
         crash = False
         fuel_proxy = 0.0
+        episode_env_return = 0.0
 
         for step in range(max_steps):
             obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 logits = policy(obs_tensor)
             action = int(torch.argmax(logits, dim=-1).item())
-            next_obs, _env_reward, terminated_flag, truncated_flag, info = env.step(action)
+            next_obs, env_reward, terminated_flag, truncated_flag, info = env.step(action)
             forced_truncated = bool(step == max_steps - 1 and not terminated_flag and not truncated_flag)
             step_terminated = bool(terminated_flag)
             step_truncated = bool(truncated_flag or forced_truncated)
+            episode_env_return += float(env_reward)
             raw_phase = classify_phase(next_obs, reward_config)
             phase = stabilize_phase(raw_phase, reward_state.prev_phase)
             reward_dict = compute_step_reward(
@@ -278,6 +280,7 @@ def evaluate_saved_checkpoint(run_dir: Path, selection: CheckpointSelection) -> 
                 config=reward_config,
                 visited_phases=reward_state.visited_phases,
                 visited_micro_progress=reward_state.visited_micro_progress,
+                episode_return=episode_env_return,
             )
             actions.append(action)
             phases.append(phase)

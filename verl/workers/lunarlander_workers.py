@@ -277,6 +277,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
         r_total = []
         step_dump = []
         fuel_proxy = 0.0
+        episode_env_return = 0.0
 
         reward_state = LunarLanderRewardState()
         success = False
@@ -296,10 +297,11 @@ class LunarLanderActorRolloutRefWorker(Worker):
             action = int(action_tensor.item())
             log_prob = float(dist.log_prob(action_tensor).item())
 
-            next_obs, _env_reward, terminated, truncated, info = env.step(action)
+            next_obs, env_reward, terminated, truncated, info = env.step(action)
             forced_truncated = bool(step == max_steps - 1 and not terminated and not truncated)
             step_terminated = bool(terminated)
             step_truncated = bool(truncated or forced_truncated)
+            episode_env_return += float(env_reward)
             raw_phase = classify_phase(next_obs, reward_config)
             phase = stabilize_phase(raw_phase, reward_state.prev_phase)
             reward_dict = compute_step_reward(
@@ -315,6 +317,7 @@ class LunarLanderActorRolloutRefWorker(Worker):
                 config=reward_config,
                 visited_phases=reward_state.visited_phases,
                 visited_micro_progress=reward_state.visited_micro_progress,
+                episode_return=episode_env_return,
             )
 
             observations.append(np.asarray(obs, dtype=np.float32))

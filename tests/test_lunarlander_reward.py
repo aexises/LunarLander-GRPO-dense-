@@ -128,12 +128,39 @@ def test_smoothness_reward_prefers_repeated_action():
     assert switched_action == -2.0
 
 
-def test_final_reward_uses_success_thresholds():
+def test_final_reward_uses_episode_outcome_semantics():
     config = LunarLanderRewardConfig()
     success_obs = [0.05, 0.2, 0.05, -0.05, 0.02, 0.0, 1.0, 1.0]
     failure_obs = [0.6, 0.2, 0.5, -0.8, 0.6, 0.0, 1.0, 1.0]
-    assert compute_final_reward(success_obs, terminated=True, truncated=False, info={}, config=config) == 1.0
-    assert compute_final_reward(failure_obs, terminated=True, truncated=False, info={}, config=config) == 0.0
+    assert compute_final_reward(
+        success_obs,
+        terminated=True,
+        truncated=False,
+        info={},
+        config=config,
+        episode_return=220.0,
+    ) == 1.0
+    assert compute_final_reward(
+        failure_obs,
+        terminated=True,
+        truncated=False,
+        info={},
+        config=config,
+        episode_return=-100.0,
+    ) == 0.0
+
+
+def test_final_reward_does_not_treat_stable_crash_state_as_success():
+    config = LunarLanderRewardConfig()
+    false_positive_obs = [0.136, -0.043, 0.036, 0.0, 0.0, 0.0, 1.0, 1.0]
+    assert compute_final_reward(
+        false_positive_obs,
+        terminated=True,
+        truncated=False,
+        info={},
+        config=config,
+        episode_return=-99.23,
+    ) == 0.0
 
 
 def test_total_reward_composition_adds_terminal_term_only_at_episode_end():
@@ -162,6 +189,7 @@ def test_total_reward_composition_adds_terminal_term_only_at_episode_end():
         truncated=False,
         info={},
         config=config,
+        episode_return=220.0,
     )
     assert non_terminal["r_final"] == 0.0
     assert terminal["r_final"] == 1.0
