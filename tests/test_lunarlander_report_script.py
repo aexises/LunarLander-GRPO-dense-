@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-def _write_run(run_dir: Path, name: str, weights: dict, summary: dict):
+def _write_run(run_dir: Path, name: str, weights: dict, summary: dict, model: dict | None = None):
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "run_config_snapshot.json").write_text(
         json.dumps(
@@ -17,7 +17,10 @@ def _write_run(run_dir: Path, name: str, weights: dict, summary: dict):
                     "success": {"max_abs_x": 0.2},
                 },
                 "eval": {"seed_list": [0, 1, 2]},
-                "actor_rollout_ref": {"rollout": {"env_name": "LunarLander-v3"}},
+                "actor_rollout_ref": {
+                    "model": model or {},
+                    "rollout": {"env_name": "LunarLander-v3"},
+                },
             }
         ),
         encoding="utf-8",
@@ -42,6 +45,11 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
     run_terminal_smooth = tmp_path / "terminal_smooth"
     run_terminal_sub_prog = tmp_path / "terminal_sub_prog"
     run_full = tmp_path / "full"
+    run_full_random = tmp_path / "full_random_init"
+    anchor_model = {
+        "activation": "relu",
+        "pretrained_policy_path": "verl/assets/lunarlander/lunarlander_baseline_clean_seed42.pt",
+    }
 
     _write_run(
         run_terminal_only,
@@ -90,6 +98,7 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
                 "final": 1.0,
             },
         },
+        model=anchor_model,
     )
     _write_run(
         run_terminal_smooth,
@@ -138,6 +147,7 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
                 "final": 0.18,
             },
         },
+        model=anchor_model,
     )
     _write_run(
         run_terminal_sub_prog,
@@ -186,6 +196,7 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
                 "final": 0.23,
             },
         },
+        model=anchor_model,
     )
     _write_run(
         run_full,
@@ -234,6 +245,55 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
                 "final": 0.18,
             },
         },
+        model=anchor_model,
+    )
+    _write_run(
+        run_full_random,
+        "full_random_init",
+        {"sub": 0.1, "prog": 0.3, "smooth": 0.005, "final": 1.0},
+        {
+            "final_train_success_rate": 0.44,
+            "best_train_success_rate": 0.52,
+            "final_val_success_rate": 0.33,
+            "best_val_success_rate": 0.37,
+            "final_train_total_reward": 0.49,
+            "final_val_total_reward": 0.46,
+            "final_reward_hacking_warning": 0.0,
+            "final_eval_num_seeds_configured": 3.0,
+            "final_val_num_eval_episodes": 3.0,
+            "final_eval_full_seed_coverage": 1.0,
+            "final_eval_seed_hash": "seedhash",
+            "final_train_phase_counts": {"approach": 0.0, "align": 9.0, "descend": 3.0, "touchdown": 2.0},
+            "final_val_phase_counts": {"approach": 0.0, "align": 5.0, "descend": 2.0, "touchdown": 1.0},
+            "final_train_phase_episode_counts": {"approach": 0.0, "align": 4.0, "descend": 2.0, "touchdown": 2.0},
+            "final_val_phase_episode_counts": {"approach": 0.0, "align": 3.0, "descend": 2.0, "touchdown": 1.0},
+            "final_train_num_phase_transitions": 1.5,
+            "final_val_num_phase_transitions": 1.3,
+            "final_train_micro_progress_counts": {
+                "enter_x_corridor_070": 0.0,
+                "enter_x_corridor_050": 0.0,
+                "enter_x_corridor_035": 0.0,
+            },
+            "final_val_micro_progress_counts": {
+                "enter_x_corridor_070": 0.0,
+                "enter_x_corridor_050": 0.0,
+                "enter_x_corridor_035": 0.0,
+            },
+            "final_train_reward_shares": {
+                "subgoal": 0.38,
+                "progress": 0.35,
+                "micro_progress": 0.0,
+                "smoothness": 0.08,
+                "final": 0.19,
+            },
+            "final_val_reward_shares": {
+                "subgoal": 0.36,
+                "progress": 0.36,
+                "micro_progress": 0.0,
+                "smoothness": 0.06,
+                "final": 0.22,
+            },
+        },
     )
 
     output_path = tmp_path / "report.md"
@@ -245,6 +305,7 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
             str(run_terminal_smooth),
             str(run_terminal_sub_prog),
             str(run_full),
+            str(run_full_random),
             "--output",
             str(output_path),
         ],
@@ -262,6 +323,8 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
     assert "## Interpretation" in report
     assert "## Artifact Appendix" in report
     assert "phase-local shaping" in report
+    assert "Competent-anchor runs: `terminal_only, terminal_smooth, terminal_sub_prog, full`" in report
+    assert "Policy initializations present: `['competent_anchor', 'random_init']`" in report
     assert "misalignment warning" in report
     assert "Any run with nonzero APPROACH usage: `False`" in report
     assert "Any run with nonzero micro-progress usage: `False`" in report
@@ -275,12 +338,17 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
     with csv_path.open("r", encoding="utf-8", newline="") as file_obj:
         rows = list(csv.DictReader(file_obj))
 
-    assert len(rows) == 4
+    assert len(rows) == 5
     rows_by_run = {row["run"]: row for row in rows}
     assert rows_by_run["terminal_only"]["final_train_success_rate"] == ""
     assert rows_by_run["terminal_only"]["final_train_phase_counts_approach"] == ""
+    assert rows_by_run["terminal_only"]["policy_init"] == "competent_anchor"
     assert rows_by_run["terminal_only"]["final_val_reward_shares_final"] == "1.0"
     assert rows_by_run["full"]["final_train_phase_counts_approach"] == "0.0"
+    assert rows_by_run["full"]["policy_init"] == "competent_anchor"
     assert rows_by_run["full"]["final_train_micro_progress_counts_enter_x_corridor_050"] == "0.0"
     assert rows_by_run["full"]["final_train_reward_shares_micro_progress"] == "0.0"
+    assert rows_by_run["full_random_init"]["policy_init"] == "random_init"
+    assert rows_by_run["full_random_init"]["policy_activation"] == ""
+    assert rows_by_run["full_random_init"]["pretrained_policy_path"] == ""
     assert rows_by_run["terminal_smooth"]["final_reward_hacking_warning"] == "1.0"

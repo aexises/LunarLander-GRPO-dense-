@@ -63,6 +63,20 @@ def nested_value(summary: dict, key: str, nested_key: str):
     return value.get(nested_key)
 
 
+def normalize_pretrained_policy_path(value):
+    if value in (None, "", "None", "null"):
+        return None
+    return str(value)
+
+
+def infer_policy_init(config: dict):
+    model_cfg = config.get("actor_rollout_ref", {}).get("model", {})
+    pretrained_policy_path = normalize_pretrained_policy_path(model_cfg.get("pretrained_policy_path"))
+    if pretrained_policy_path is None:
+        return "random_init", None, model_cfg.get("activation")
+    return "competent_anchor", pretrained_policy_path, model_cfg.get("activation")
+
+
 def reward_warning_label(run: dict):
     return "misalignment warning" if (get_metric(run, "final_reward_hacking_warning") or 0) > 0 else "ok"
 
@@ -97,6 +111,7 @@ def summarize_run(run_dir: Path):
     trainer = config.get("trainer", {})
     eval_cfg = config.get("eval", {})
     rollout_cfg = config.get("actor_rollout_ref", {}).get("rollout", {})
+    policy_init, pretrained_policy_path, activation = infer_policy_init(config)
     plots_dir = run_dir / "plots"
     trajectory_dir = run_dir / "trajectory_dumps"
     return {
@@ -106,6 +121,9 @@ def summarize_run(run_dir: Path):
         "reward": reward,
         "weights": weights,
         "summary": summary,
+        "policy_init": policy_init,
+        "pretrained_policy_path": pretrained_policy_path,
+        "policy_activation": activation,
         "eval_seeds": eval_cfg.get("seed_list", []),
         "env_name": rollout_cfg.get("env_name", "LunarLander-v3"),
         "plots_present": [name for name in PLOT_FILES if (plots_dir / name).exists()],
@@ -190,6 +208,9 @@ def build_csv_rows(runs: list[dict]):
         row = {
             "run": run["name"],
             "dir": str(run["dir"]),
+            "policy_init": csv_value(run["policy_init"]),
+            "policy_activation": csv_value(run["policy_activation"]),
+            "pretrained_policy_path": csv_value(run["pretrained_policy_path"]),
             "w_sub": csv_value(run["weights"].get("sub")),
             "w_prog": csv_value(run["weights"].get("prog")),
             "w_smooth": csv_value(run["weights"].get("smooth")),
@@ -262,6 +283,7 @@ def build_report(runs: list[dict], output_path: Path):
     best_final_val_run, best_final_val = best_run_by_metric(runs, "final_val_success_rate")
     best_best_val_run, best_best_val = best_run_by_metric(runs, "best_val_success_rate")
     best_final_train_run, best_final_train = best_run_by_metric(runs, "final_train_success_rate")
+    competent_anchor_runs = [run for run in runs if run["policy_init"] == "competent_anchor"]
     warning_runs = [run for run in runs if (get_metric(run, "final_reward_hacking_warning") or 0) > 0]
     any_approach_usage = any_run_has_metric(
         runs,
@@ -283,6 +305,11 @@ def build_report(runs: list[dict], output_path: Path):
         f"- Best run by final validation success: {format_run_and_value(best_final_val_run, best_final_val)}",
         f"- Best run by best validation success: {format_run_and_value(best_best_val_run, best_best_val)}",
         f"- Best run by final train success: {format_run_and_value(best_final_train_run, best_final_train)}",
+        (
+            "- Competent-anchor runs: `none`"
+            if not competent_anchor_runs
+            else f"- Competent-anchor runs: `{', '.join(run['name'] for run in competent_anchor_runs)}`"
+        ),
         (
             "- Reward-hacking warning runs: `none`"
             if not warning_runs
@@ -306,6 +333,7 @@ def build_report(runs: list[dict], output_path: Path):
         f"- Full eval seed coverage: `{summary.get('final_eval_full_seed_coverage', 'n/a')}`",
         f"- Deterministic eval: `{summary.get('final_eval_deterministic', 'n/a')}`",
         f"- Evaluated episodes per validation window: `{summary.get('final_val_num_eval_episodes', 'n/a')}` / `{summary.get('final_eval_num_seeds_configured', 'n/a')}`",
+        f"- Policy initializations present: `{sorted({run['policy_init'] for run in runs})}`",
         f"- Phase thresholds: `{reward_cfg.get('phase_thresholds', {})}`",
         f"- Success thresholds: `{reward_cfg.get('success', {})}`",
         "",
@@ -319,8 +347,8 @@ def build_report(runs: list[dict], output_path: Path):
         "",
         "## Main Ablation Comparison",
         "",
-        "| Run | w_sub | w_prog | w_smooth | w_final | Final Train Success | Best Train Success | Final Val Success | Best Val Success | Final Train Reward | Final Val Reward | Warning |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Run | Init | Activation | w_sub | w_prog | w_smooth | w_final | Final Train Success | Best Train Success | Final Val Success | Best Val Success | Final Train Reward | Final Val Reward | Warning |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
 
     for run in runs:
@@ -331,6 +359,8 @@ def build_report(runs: list[dict], output_path: Path):
             + " | ".join(
                 [
                     run["name"],
+                    run["policy_init"],
+                    format_value(run["policy_activation"]),
                     format_value(weights.get("sub")),
                     format_value(weights.get("prog")),
                     format_value(weights.get("smooth")),
@@ -446,6 +476,7 @@ def build_report(runs: list[dict], output_path: Path):
         lines.extend(
             [
                 f"- `{run['name']}`: `{run['dir']}`",
+                f"  - Policy init: `{run['policy_init']}`; activation: `{run['policy_activation']}`; pretrained policy: `{run['pretrained_policy_path'] or 'n/a'}`",
                 f"  - Plots present: `{run['plots_present']}`",
                 f"  - Trace files present: `{run['trace_files_present']}`",
                 f"  - Trajectory dumps: `json={run['trajectory_dump_count']}`, `png={run['trajectory_png_count']}`",

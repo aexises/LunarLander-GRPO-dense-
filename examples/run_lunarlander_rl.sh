@@ -19,13 +19,9 @@ TEST_FREQ="${TEST_FREQ:-10}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
 MAX_STEPS="${MAX_STEPS:-400}"
 LUNARLANDER_PRETRAINED_POLICY="${LUNARLANDER_PRETRAINED_POLICY:-verl/assets/lunarlander/lunarlander_baseline_clean_seed42.pt}"
-LUNARLANDER_POLICY_ACTIVATION="${LUNARLANDER_POLICY_ACTIVATION:-relu}"
-
-if [ ! -f "$LUNARLANDER_PRETRAINED_POLICY" ]; then
-  echo "Missing LunarLander pretrained policy: $LUNARLANDER_PRETRAINED_POLICY"
-  echo "Terminal-reward GRPO is configured as anchor adaptation, not random-init training."
-  exit 1
-fi
+LUNARLANDER_POLICY_INIT="${LUNARLANDER_POLICY_INIT:-auto}"
+LUNARLANDER_POLICY_ACTIVATION="${LUNARLANDER_POLICY_ACTIVATION:-auto}"
+RUN_NAME_SUFFIX="${RUN_NAME_SUFFIX:-}"
 
 case "$ABLATION" in
   terminal_only)
@@ -69,6 +65,45 @@ case "$ABLATION" in
     ;;
 esac
 
+case "$LUNARLANDER_POLICY_INIT" in
+  auto)
+    RESOLVED_POLICY_INIT=competent_anchor
+    ;;
+  competent_anchor|anchor)
+    RESOLVED_POLICY_INIT=competent_anchor
+    ;;
+  random_init|random|none)
+    RESOLVED_POLICY_INIT=random_init
+    ;;
+  *)
+    echo "Unknown LunarLander policy init mode: $LUNARLANDER_POLICY_INIT"
+    exit 1
+    ;;
+esac
+
+if [ "$LUNARLANDER_POLICY_ACTIVATION" = "auto" ]; then
+  if [ "$RESOLVED_POLICY_INIT" = "competent_anchor" ]; then
+    RESOLVED_POLICY_ACTIVATION=relu
+  else
+    RESOLVED_POLICY_ACTIVATION=tanh
+  fi
+else
+  RESOLVED_POLICY_ACTIVATION="$LUNARLANDER_POLICY_ACTIVATION"
+fi
+
+if [ "$RESOLVED_POLICY_INIT" = "competent_anchor" ]; then
+  if [ ! -f "$LUNARLANDER_PRETRAINED_POLICY" ]; then
+    echo "Missing LunarLander pretrained policy: $LUNARLANDER_PRETRAINED_POLICY"
+    echo "Competent-anchor runs require a bundled pretrained policy checkpoint."
+    exit 1
+  fi
+  RESOLVED_PRETRAINED_POLICY="$LUNARLANDER_PRETRAINED_POLICY"
+else
+  RESOLVED_PRETRAINED_POLICY=null
+fi
+
+RUN_NAME="${EXPERIMENT_NAME}_${ABLATION}${RUN_NAME_SUFFIX}"
+
 HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   data.task_suite_name=lunarlander \
   data.filter_accuracy=False \
@@ -79,9 +114,9 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   actor_rollout_ref.model.action_token_len=1 \
   actor_rollout_ref.model.action_chunks_len=1 \
   actor_rollout_ref.model.hidden_size=128 \
-  actor_rollout_ref.model.activation=$LUNARLANDER_POLICY_ACTIVATION \
+  actor_rollout_ref.model.activation=$RESOLVED_POLICY_ACTIVATION \
   actor_rollout_ref.model.seed=0 \
-  actor_rollout_ref.model.pretrained_policy_path=$LUNARLANDER_PRETRAINED_POLICY \
+  actor_rollout_ref.model.pretrained_policy_path=$RESOLVED_PRETRAINED_POLICY \
   actor_rollout_ref.actor.strategy=fsdp \
   actor_rollout_ref.actor.optim.lr=3e-4 \
   actor_rollout_ref.actor.optim.warmup_style=constant \
@@ -145,8 +180,8 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   audit.max_val_episodes=$AUDIT_MAX_VAL_EPISODES \
   trainer.logger="['console']" \
   trainer.project_name=$PROJECT_NAME \
-  trainer.experiment_name="${EXPERIMENT_NAME}_${ABLATION}" \
-  trainer.default_local_dir="$CKPT_PATH/$PROJECT_NAME/${EXPERIMENT_NAME}_${ABLATION}" \
+  trainer.experiment_name="$RUN_NAME" \
+  trainer.default_local_dir="$CKPT_PATH/$PROJECT_NAME/$RUN_NAME" \
   trainer.n_gpus_per_node=$NUM_GPUS \
   trainer.nnodes=$NUM_NODES \
   trainer.save_freq=$SAVE_FREQ \
