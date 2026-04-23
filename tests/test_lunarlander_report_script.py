@@ -314,10 +314,19 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
 
     report = output_path.read_text(encoding="utf-8")
     csv_path = output_path.with_suffix(".csv")
+    plot_dir = tmp_path / "report_plots"
     assert csv_path.exists()
+    assert (plot_dir / "success_metric_comparison.png").exists()
+    assert (plot_dir / "success_metric_delta_vs_terminal_only.png").exists()
+    assert (plot_dir / "reward_metric_comparison.png").exists()
+    assert (plot_dir / "reward_metric_delta_vs_terminal_only.png").exists()
+    assert (plot_dir / "diagnostic_metric_comparison.png").exists()
+    assert (plot_dir / "diagnostic_metric_delta_vs_terminal_only.png").exists()
 
     assert "## Executive Summary" in report
     assert "## Main Ablation Comparison" in report
+    assert "## Baseline Comparison" in report
+    assert "## Comparison Plots" in report
     assert "## Phase and Curriculum" in report
     assert "## Reward Composition" in report
     assert "## Interpretation" in report
@@ -328,6 +337,11 @@ def test_report_script_generates_markdown_and_csv(tmp_path):
     assert "misalignment warning" in report
     assert "Any run with nonzero APPROACH usage: `False`" in report
     assert "Any run with nonzero micro-progress usage: `False`" in report
+    assert "Baseline run: `terminal_only`" in report
+    assert "Random-init runs are excluded from this comparison section" in report
+    assert "[success_metric_comparison.png](report_plots/success_metric_comparison.png)" in report
+    assert "[reward_metric_delta_vs_terminal_only.png](report_plots/reward_metric_delta_vs_terminal_only.png)" in report
+    assert "| Run | Final Train Fuel Proxy | Delta vs terminal_only | Final Val Fuel Proxy | Delta vs terminal_only |" in report
     assert "`full` trails `terminal_sub_prog` on final train success" in report
     assert "`full` trails `terminal_sub_prog` on final validation success" in report
     assert "train APPROACH=0.0000, val APPROACH=0.0000" in report

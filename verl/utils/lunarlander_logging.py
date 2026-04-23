@@ -534,7 +534,7 @@ class LunarLanderArtifactLogger:
 
 - Total reward: `w_sub * r_sub + w_prog * (r_prog + r_micro) + w_smooth * r_smooth + w_final * r_final_terminal_only`
 - Weights: `sub={weights.get("sub")}`, `prog={weights.get("prog")}`, `smooth={weights.get("smooth")}`, `final={weights.get("final")}`
-- Subgoal reward: `clip(f(s_(t-1)) - f(s_t), -1, 1)` with phase-local error functions
+- Subgoal reward: `clip(f(s_t) - f(s_(t-1)), -1, 0)` with phase-local error functions
 - Progress reward: first-entry phase bonuses plus one-time micro-progress corridor bonuses
 - Subgoal settings: `{reward_cfg.get("subgoal", {})}`
 - Smoothness reward: `{reward_cfg.get("smoothness", {})}`
@@ -543,13 +543,13 @@ class LunarLanderArtifactLogger:
 
 ## Ablations
 
-| Ablation | w_sub | w_prog | w_smooth | w_final | Status |
-| --- | ---: | ---: | ---: | ---: | --- |
-| terminal_only | 0.0 | 0.0 | 0.0 | 1.0 | compare manually / suite |
-| terminal_smooth | 0.0 | 0.0 | >0 | 1.0 | compare manually / suite |
-| terminal_sub_prog | >0 | >0 | 0.0 | 1.0 | compare manually / suite |
-| full | >0 | >0 | >0 | 1.0 | compare manually / suite |
-| dense_only | >0 | >0 | >0 | 0.0 | diagnostic only |
+| Ablation | Reward mode | w_sub | w_prog | w_smooth | w_final | Status |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| terminal_only | terminal_only | 0.0 | 0.0 | 0.0 | 1.0 | binary terminal-success baseline |
+| terminal_smooth | lunarlander_shaped | 0.0 | 0.0 | 0.005 | 1.0 | terminal reward plus smoothness |
+| terminal_sub_prog | lunarlander_shaped | 0.10 | 0.30 | 0.0 | 1.0 | terminal reward plus subgoal and progress |
+| full | lunarlander_shaped | 0.10 | 0.30 | 0.005 | 1.0 | full current shaped reward |
+| dense_only | lunarlander_shaped | 0.10 | 0.30 | 0.005 | 0.0 | diagnostic dense-only run |
 
 ## Results
 

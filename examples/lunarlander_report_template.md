@@ -2,7 +2,7 @@
 
 ## Setup
 
-- Environment: `LunarLander-v2`
+- Environment: `LunarLander-v3`
 - Training configuration:
 - Reward configuration:
 - Seeds:
@@ -19,13 +19,13 @@
 
 ## Ablations
 
-| Ablation | w_sub | w_prog | w_smooth | w_final | Notes |
-| --- | ---: | ---: | ---: | ---: | --- |
-| terminal_only | 0.0 | 0.0 | 0.0 | 1.0 | Baseline |
-| terminal_smooth | 0.0 | 0.0 | >0 | 1.0 | Smoothness regularization only |
-| terminal_sub_prog | >0 | >0 | 0.0 | 1.0 | Dense shaping without smoothness |
-| full | >0 | >0 | >0 | 1.0 | Full shaped reward |
-| dense_only | >0 | >0 | >0 | 0.0 | Diagnostic and potentially misaligned |
+| Ablation | Reward mode | w_sub | w_prog | w_smooth | w_final | Notes |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| terminal_only | terminal_only | 0.0 | 0.0 | 0.0 | 1.0 | Binary terminal-success baseline |
+| terminal_smooth | lunarlander_shaped | 0.0 | 0.0 | 0.005 | 1.0 | Terminal reward plus smoothness |
+| terminal_sub_prog | lunarlander_shaped | 0.10 | 0.30 | 0.0 | 1.0 | Terminal reward plus subgoal and progress |
+| full | lunarlander_shaped | 0.10 | 0.30 | 0.005 | 1.0 | Full current shaped reward |
+| dense_only | lunarlander_shaped | 0.10 | 0.30 | 0.005 | 0.0 | Dense shaping with terminal reward removed |
 
 ## Results
 

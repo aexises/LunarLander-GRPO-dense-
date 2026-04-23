@@ -1,129 +1,67 @@
 # Instructions
 
-This repository is now organized as a normal top-level checkout. The old nested `SimpleVLA-RL/` wrapper has been removed, so all commands should be run from the repo root.
+All commands in this repo should be run from the repository root.
 
-## Repository layout
+## Main workflows
 
-- `verl/` contains the training stack
-- `examples/` contains runnable scripts
-- `tests/` contains targeted tests
-- `figs/`, `modified_codes/`, and top-level setup files remain at the root
-
-## Install dependencies
-
-For the LunarLander work in this repo, you can skip the full VLA setup for now.
-
-Create and activate a local environment:
+### 1. Run a single competent-anchor LunarLander ablation
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+NUM_GPUS=0 ABLATION=terminal_only bash examples/run_lunarlander_rl.sh
+NUM_GPUS=0 ABLATION=terminal_smooth bash examples/run_lunarlander_rl.sh
+NUM_GPUS=0 ABLATION=terminal_sub_prog bash examples/run_lunarlander_rl.sh
+NUM_GPUS=0 ABLATION=full bash examples/run_lunarlander_rl.sh
+NUM_GPUS=0 ABLATION=dense_only bash examples/run_lunarlander_rl.sh
 ```
 
-Install the LunarLander runtime, testing, and plotting packages:
+### 2. Run a single random-init ablation
 
 ```bash
-pip install -r requirements-lunarlander.txt
+NUM_GPUS=0 LUNARLANDER_POLICY_INIT=random_init ABLATION=full bash examples/run_lunarlander_rl.sh
 ```
 
-Only use [SETUP.md](/Users/daeron/LunarLander-GRPO-dense-/SETUP.md) when you are ready to run the original VLA workflows too.
-
-## LunarLander resource needs
-
-If you only want LunarLander, this repo can now run without a GPU.
-
-- Minimum for a quick local run: 4 CPU cores and 8 GB RAM
-- Recommended for longer runs: 8 CPU cores and 16 GB RAM
-- Disk: keep a couple of GB free for the virtualenv, Ray temp files, checkpoints, plots, and trajectory dumps
-- GPU: optional; use `NUM_GPUS=1` only on a CUDA machine
-- Default behavior: `examples/run_lunarlander_rl.sh` now runs in CPU mode unless you override `NUM_GPUS`
-- Gymnasium env id: `LunarLander-v3`
-- Default eval protocol: fixed 32-seed deterministic validation
-
-## Common commands
-
-### Run LunarLander shaped-reward training
-
-```bash
-bash examples/run_lunarlander_rl.sh
-```
-
-### Run a short implementation-validation pass
-
-```bash
-NUM_GPUS=0 TOTAL_EPOCHS=5 NUM_TRIALS_PER_TASK=128 TRAIN_BATCH_SIZE=16 N_SAMPLES=4 \
-AUDIT_MAX_TRAIN_EPISODES=128 AUDIT_MAX_VAL_EPISODES=32 \
-bash examples/run_lunarlander_rl.sh
-```
-
-### Force CPU mode on a laptop
-
-```bash
-NUM_GPUS=0 bash examples/run_lunarlander_rl.sh
-```
-
-### Use a GPU on a CUDA machine
-
-```bash
-NUM_GPUS=1 bash examples/run_lunarlander_rl.sh
-```
-
-### Run a specific LunarLander ablation
-
-```bash
-ABLATION=terminal_only bash examples/run_lunarlander_rl.sh
-ABLATION=terminal_smooth bash examples/run_lunarlander_rl.sh
-ABLATION=terminal_sub_prog bash examples/run_lunarlander_rl.sh
-ABLATION=full bash examples/run_lunarlander_rl.sh
-ABLATION=dense_only bash examples/run_lunarlander_rl.sh
-```
-
-### Run the whole ablation suite and build an aggregate report
+### 3. Run the default anchor-based suite
 
 ```bash
 bash examples/run_lunarlander_ablation_suite.sh
 ```
 
-### Run focused tests
+This script now runs only the competent-anchor ablations and writes a suite report plus suite-level comparison plots.
+
+### 4. Run the separate random-init suite
 
 ```bash
-pytest -q tests/test_lunarlander_reward.py tests/test_lunarlander_reward_manager.py
+bash examples/run_lunarlander_random_init_suite.sh
 ```
 
-### Syntax check changed Python files
+This is the opt-in comparison path for random-start policies.
+
+### 5. Regenerate a suite report from existing run directories
+
+Anchor-only example:
 
 ```bash
-python3 -m py_compile \
-  verl/utils/lunarlander_shaped_reward.py \
-  verl/workers/lunarlander_workers.py \
-  verl/trainer/main_ppo.py \
-  verl/trainer/ppo/ray_trainer.py \
-  verl/utils/dataset/rob_dataset.py
+python3 examples/generate_lunarlander_report.py \
+  checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_terminal_only \
+  checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_terminal_smooth \
+  checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_terminal_sub_prog \
+  checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_full \
+  checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_dense_only \
+  --output checkpoints/SimpleVLA-RL/lunarlander_grpo_suite_report.md
 ```
+
+## Important artifact locations
+
+- Per-run metrics summary: `checkpoints/.../<run>/metrics_summary.json`
+- Per-run markdown report: `checkpoints/.../<run>/run_report.md`
+- Suite markdown report: `checkpoints/.../*_report.md`
+- Suite CSV summary: `checkpoints/.../*_report.csv`
+- Suite comparison plots: `checkpoints/.../*_report_plots/*.png`
 
 ## Practical notes
 
-- The dedicated LunarLander dependency list lives in [requirements-lunarlander.txt](/Users/daeron/LunarLander-GRPO-dense-/requirements-lunarlander.txt).
-- The LunarLander path currently expects `hydra-core`, `omegaconf`, `ray`, `torch`, `tensordict`, `gymnasium[box2d]`, `matplotlib`, `pandas`, and `numpy`.
-- If `matplotlib` is installed, LunarLander runs also emit PNG plots automatically.
-- The LunarLander worker is intentionally single-process for the first pass.
-- The original OpenVLA/LIBERO/Robotwin paths are still present.
-- Reward shaping for LunarLander is configured in `verl/trainer/config/ppo_trainer.yaml`.
-- The current shaped reward uses explicit thresholds for `APPROACH`, `ALIGN`, `DESCEND`, and `TOUCHDOWN`, a delta-style subgoal term, one-time progress bonuses per phase, and default weights `sub=0.15`, `prog=0.45`, `smooth=0.002`, `final=1.0`.
-- Trajectory dumps and experiment outputs are written under the configured `trainer.default_local_dir`.
-- Metric history is written to `metrics_history.jsonl` and `metrics_history.csv`.
-- Step-level forensic traces are written to `audit_traces_train.csv` / `.jsonl` and `audit_traces_val.csv` / `.jsonl`.
-- The first full audit window now defaults to 128 train episodes and 32 validation episodes, which is enough to compare trace-derived success rates against logged metrics.
-- Metrics now include phase occupancy, phase transitions, weighted component totals, successful-vs-failed reward dominance summaries, and audit consistency checks.
-- Summary plots are written to `plots/`, and evaluation trajectory graphics are written beside the trajectory JSON dumps.
-- Each run also writes `run_report.md`.
-- The suite runner writes a combined markdown report across ablations.
-- Rerunning the same experiment directory resets the local metrics, plots, audit traces, and trajectory dumps for a clean diagnostic record.
-
-## Suggested workflow
-
-1. Create a local environment and install the LunarLander dependencies above.
-2. Run the focused tests.
-3. Start with `NUM_GPUS=0 bash examples/run_lunarlander_rl.sh` on a laptop or CPU-only machine.
-4. Fill in `examples/lunarlander_report_template.md` with metrics and plots.
+- Competent-anchor runs use the bundled checkpoint at `verl/assets/lunarlander/lunarlander_baseline_clean_seed42.pt`.
+- Random-init runs use a fresh `tanh` MLP unless overridden.
+- Validation is deterministic on 32 fixed seeds.
+- The suite report compares competent-anchor runs against `terminal_only` as the baseline.
+- Random-init runs are excluded from the baseline-comparison tables and baseline-comparison plots unless you generate a random-init-only report explicitly.

@@ -29,6 +29,30 @@ TRACE_FILES = (
     "audit_traces_val.csv",
     "audit_traces_val.jsonl",
 )
+SUCCESS_METRICS = (
+    ("final_train_success_rate", "Final Train Success"),
+    ("best_train_success_rate", "Best Train Success"),
+    ("final_val_success_rate", "Final Val Success"),
+    ("best_val_success_rate", "Best Val Success"),
+)
+REWARD_METRICS = (
+    ("final_train_total_reward", "Final Train Reward"),
+    ("best_train_success_rate", "Best Train Success"),
+    ("final_val_total_reward", "Final Val Reward"),
+    ("best_val_success_rate", "Best Val Success"),
+)
+DIAGNOSTIC_METRICS = (
+    ("final_train_fuel_proxy", "Final Train Fuel Proxy"),
+    ("final_val_fuel_proxy", "Final Val Fuel Proxy"),
+    ("final_train_num_phase_transitions", "Final Train Phase Transitions"),
+    ("final_val_num_phase_transitions", "Final Val Phase Transitions"),
+)
+BASELINE_METRICS = SUCCESS_METRICS + REWARD_METRICS + DIAGNOSTIC_METRICS
+SUITE_PLOT_GROUPS = (
+    ("success_metric_comparison.png", "success_metric_delta_vs_terminal_only.png", SUCCESS_METRICS),
+    ("reward_metric_comparison.png", "reward_metric_delta_vs_terminal_only.png", REWARD_METRICS),
+    ("diagnostic_metric_comparison.png", "diagnostic_metric_delta_vs_terminal_only.png", DIAGNOSTIC_METRICS),
+)
 
 
 def load_json(path: Path):
@@ -201,6 +225,107 @@ def compare_full_vs_subprog(runs: list[dict]):
     }
 
 
+def baseline_run(runs: list[dict]):
+    for run in runs:
+        name = run["name"]
+        if name == "terminal_only" or name.endswith("_terminal_only"):
+            return run
+    return None
+
+
+def competent_anchor_comparison_runs(runs: list[dict]):
+    return [run for run in runs if run["policy_init"] == "competent_anchor"]
+
+
+def metric_delta(run: dict, baseline: dict, metric: str):
+    run_value = get_metric(run, metric)
+    baseline_value = get_metric(baseline, metric)
+    if run_value is None or baseline_value is None:
+        return None
+    return float(run_value) - float(baseline_value)
+
+
+def baseline_comparison_rows(runs: list[dict], baseline: dict):
+    rows = []
+    for run in runs:
+        row = {"run": run}
+        for metric, _label in BASELINE_METRICS:
+            row[metric] = get_metric(run, metric)
+            row[f"{metric}_delta"] = metric_delta(run, baseline, metric)
+        rows.append(row)
+    return rows
+
+
+def build_metric_plot_group(plt, runs: list[dict], baseline: dict, metrics: tuple[tuple[str, str], ...], absolute_path: Path, delta_path: Path):
+    labels = [run["name"] for run in runs]
+    baseline_idx = labels.index(baseline["name"])
+    colors = ["#c3d6c8"] * len(labels)
+    colors[baseline_idx] = "#2f6b3b"
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    for ax, (metric, title) in zip(axes.flat, metrics):
+        values = [get_metric(run, metric) if get_metric(run, metric) is not None else float("nan") for run in runs]
+        ax.bar(labels, values, color=colors)
+        ax.set_title(title)
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(absolute_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+    delta_runs = [run for run in runs if run["name"] != baseline["name"]]
+    if not delta_runs:
+        return [absolute_path]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    delta_labels = [run["name"] for run in delta_runs]
+    for ax, (metric, title) in zip(axes.flat, metrics):
+        deltas = [metric_delta(run, baseline, metric) if metric_delta(run, baseline, metric) is not None else float("nan") for run in delta_runs]
+        bar_colors = ["#4e8f5b" if (value == value and value >= 0) else "#b85c38" for value in deltas]
+        ax.bar(delta_labels, deltas, color=bar_colors)
+        ax.axhline(0.0, color="#444444", linewidth=1.0)
+        ax.set_title(f"{title} vs terminal_only")
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(delta_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return [absolute_path, delta_path]
+
+
+def create_suite_plots(runs: list[dict], output_path: Path):
+    plot_dir = output_path.parent / f"{output_path.stem}_plots"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return []
+
+    comparison_runs = competent_anchor_comparison_runs(runs)
+    baseline = baseline_run(comparison_runs)
+    if not comparison_runs or baseline is None:
+        return []
+
+    created_paths = []
+    for absolute_name, delta_name, metrics in SUITE_PLOT_GROUPS:
+        created_paths.extend(
+            build_metric_plot_group(
+                plt=plt,
+                runs=comparison_runs,
+                baseline=baseline,
+                metrics=metrics,
+                absolute_path=plot_dir / absolute_name,
+                delta_path=plot_dir / delta_name,
+            )
+        )
+
+    return created_paths
+
+
 def build_csv_rows(runs: list[dict]):
     rows = []
     for run in runs:
@@ -221,6 +346,8 @@ def build_csv_rows(runs: list[dict]):
             "best_val_success_rate": csv_value(summary.get("best_val_success_rate")),
             "final_train_total_reward": csv_value(summary.get("final_train_total_reward")),
             "final_val_total_reward": csv_value(summary.get("final_val_total_reward")),
+            "final_train_fuel_proxy": csv_value(summary.get("final_train_fuel_proxy")),
+            "final_val_fuel_proxy": csv_value(summary.get("final_val_fuel_proxy")),
             "final_reward_hacking_warning": csv_value(summary.get("final_reward_hacking_warning")),
             "final_eval_num_seeds_configured": csv_value(summary.get("final_eval_num_seeds_configured")),
             "final_val_num_eval_episodes": csv_value(summary.get("final_val_num_eval_episodes")),
@@ -271,7 +398,7 @@ def write_csv(rows: list[dict], output_path: Path):
         writer.writerows(rows)
 
 
-def build_report(runs: list[dict], output_path: Path):
+def build_report(runs: list[dict], output_path: Path, suite_plot_paths: list[Path] | None = None):
     if not runs:
         raise ValueError("No run directories provided")
 
@@ -284,6 +411,8 @@ def build_report(runs: list[dict], output_path: Path):
     best_best_val_run, best_best_val = best_run_by_metric(runs, "best_val_success_rate")
     best_final_train_run, best_final_train = best_run_by_metric(runs, "final_train_success_rate")
     competent_anchor_runs = [run for run in runs if run["policy_init"] == "competent_anchor"]
+    baseline = baseline_run(competent_anchor_runs)
+    baseline_rows = baseline_comparison_rows(competent_anchor_runs, baseline) if baseline is not None else []
     warning_runs = [run for run in runs if (get_metric(run, "final_reward_hacking_warning") or 0) > 0]
     any_approach_usage = any_run_has_metric(
         runs,
@@ -317,12 +446,6 @@ def build_report(runs: list[dict], output_path: Path):
         ),
         f"- Any run with nonzero APPROACH usage: `{any_approach_usage}`",
         f"- Any run with nonzero micro-progress usage: `{any_micro_progress_usage}`",
-        "",
-        "Dense shaping in this suite did not improve optimization uniformly: "
-        "`terminal_sub_prog` outperformed `full` on both final train and validation success, "
-        "`terminal_smooth` was the only run to trigger a misalignment warning, and `suite_full` "
-        "shows the central curriculum failure directly because APPROACH occupancy and micro-progress "
-        "usage both stayed at zero.",
         "",
         "## Experiment Setup",
         "",
@@ -376,6 +499,84 @@ def build_report(runs: list[dict], output_path: Path):
             )
             + " |"
         )
+
+    lines.extend(
+        [
+            "",
+            "## Baseline Comparison",
+            "",
+            (
+                f"- Baseline run: `{baseline['name']}`"
+                if baseline is not None
+                else "- Baseline run: `n/a`"
+            ),
+            "- Random-init runs are excluded from this comparison section and the suite-level comparison plots.",
+            "",
+            "| Run | Final Train Success | Delta vs terminal_only | Final Val Success | Delta vs terminal_only | Final Train Reward | Delta vs terminal_only | Final Val Reward | Delta vs terminal_only |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+
+    for row in baseline_rows:
+        run = row["run"]
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    run["name"],
+                    format_value(row["final_train_success_rate"]),
+                    format_value(row["final_train_success_rate_delta"]),
+                    format_value(row["final_val_success_rate"]),
+                    format_value(row["final_val_success_rate_delta"]),
+                    format_value(row["final_train_total_reward"]),
+                    format_value(row["final_train_total_reward_delta"]),
+                    format_value(row["final_val_total_reward"]),
+                    format_value(row["final_val_total_reward_delta"]),
+                ]
+            )
+            + " |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "| Run | Final Train Fuel Proxy | Delta vs terminal_only | Final Val Fuel Proxy | Delta vs terminal_only | Final Train Phase Transitions | Delta vs terminal_only | Final Val Phase Transitions | Delta vs terminal_only |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+
+    for row in baseline_rows:
+        run = row["run"]
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    run["name"],
+                    format_value(row["final_train_fuel_proxy"]),
+                    format_value(row["final_train_fuel_proxy_delta"]),
+                    format_value(row["final_val_fuel_proxy"]),
+                    format_value(row["final_val_fuel_proxy_delta"]),
+                    format_value(row["final_train_num_phase_transitions"]),
+                    format_value(row["final_train_num_phase_transitions_delta"]),
+                    format_value(row["final_val_num_phase_transitions"]),
+                    format_value(row["final_val_num_phase_transitions_delta"]),
+                ]
+            )
+            + " |"
+        )
+
+    if suite_plot_paths:
+        lines.extend(
+            [
+                "",
+                "## Comparison Plots",
+                "",
+                "- Competent-anchor runs only; `terminal_only` is the baseline reference.",
+            ]
+        )
+        for path in suite_plot_paths:
+            rel_path = path.relative_to(output_path.parent)
+            lines.append(f"- [{path.name}]({rel_path.as_posix()})")
 
     lines.extend(
         [
@@ -455,6 +656,18 @@ def build_report(runs: list[dict], output_path: Path):
     if suite_full is not None:
         lines.append(f"- `suite_full` curriculum summary: {phase_curriculum_summary(suite_full)}.")
 
+    if baseline is not None:
+        improving_val_runs = [
+            row for row in baseline_rows if row["run"]["name"] != baseline["name"] and (row["final_val_success_rate_delta"] or 0.0) > 0
+        ]
+        if improving_val_runs:
+            best_vs_baseline = max(improving_val_runs, key=lambda row: row["final_val_success_rate_delta"])
+            lines.append(
+                f"- Strongest validation gain versus `terminal_only`: `{best_vs_baseline['run']['name']}` at `{format_value(best_vs_baseline['final_val_success_rate_delta'])}`."
+            )
+        else:
+            lines.append("- No competent-anchor run improved final validation success over `terminal_only` in this report.")
+
     lines.extend(
         [
             f"- APPROACH was {'observed' if any_approach_usage else 'not observed'} anywhere in the suite. In the saved suite artifacts, all reported APPROACH counts remain zero.",
@@ -502,7 +715,8 @@ def main():
     output_path = Path(args.output)
     csv_output_path = Path(args.csv_output) if args.csv_output else output_path.with_suffix(".csv")
     runs = [summarize_run(Path(path)) for path in args.run_dirs]
-    build_report(runs=runs, output_path=output_path)
+    suite_plot_paths = create_suite_plots(runs=runs, output_path=output_path)
+    build_report(runs=runs, output_path=output_path, suite_plot_paths=suite_plot_paths)
     write_csv(rows=build_csv_rows(runs), output_path=csv_output_path)
 
 
