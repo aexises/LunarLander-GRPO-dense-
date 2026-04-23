@@ -88,3 +88,67 @@ def test_artifact_logger_writes_metrics_and_report(tmp_path):
     assert "Validation seed coverage" in report
     assert "Final train micro-progress counts" in report
     assert "LunarLander-v3" in report
+
+
+def test_artifact_logger_generates_terminal_only_report_with_fallback_metrics(tmp_path):
+    logger = LunarLanderArtifactLogger(
+        output_dir=tmp_path,
+        config={
+            "trainer": {"experiment_name": "terminal_only_run"},
+            "data": {"train_batch_size": 4, "val_batch_size": 2, "n_samples": 2},
+            "reward": {
+                "mode": "terminal_only",
+                "weights": {"sub": 0.0, "prog": 0.0, "smooth": 0.0, "final": 1.0},
+                "phase_thresholds": {"center_x_abs_for_align": 0.35},
+                "success": {"max_abs_x": 0.2},
+            },
+            "eval": {"seed_list": [0, 1]},
+            "actor_rollout_ref": {
+                "actor": {"ppo_epochs": 2, "optim": {"lr": 3e-4}},
+                "rollout": {"env_name": "LunarLander-v3"},
+            },
+        },
+        reset_existing=True,
+    )
+
+    logger.log_metrics(
+        step=3,
+        data={
+            "train_verify_score/all": 0.375,
+            "critic/reward_components/mean_total_reward": 0.375,
+            "critic/task/mean_fuel_proxy": 12.5,
+            "val/test_score/all": 0.25,
+            "val/test_reward/mean_total_reward": 0.25,
+            "val/test_reward/mean_fuel_proxy": 10.0,
+            "val/test_reward/phase_counts/approach": 0.0,
+            "val/test_reward/phase_counts/align": 4.0,
+            "val/test_reward/phase_counts/descend": 1.0,
+            "val/test_reward/phase_counts/touchdown": 0.0,
+            "val/test_reward/phase_episode_counts/approach": 0.0,
+            "val/test_reward/phase_episode_counts/align": 2.0,
+            "val/test_reward/phase_episode_counts/descend": 1.0,
+            "val/test_reward/phase_episode_counts/touchdown": 0.0,
+            "val/test_meta/num_eval_episodes": 2,
+            "val/test_meta/num_eval_seeds_configured": 2,
+            "val/test_meta/eval_full_seed_coverage": 1.0,
+            "val/test_meta/eval_seed_hash": "abc123",
+            "val/test_meta/eval_seed_list": "[0, 1]",
+            "val/test_meta/deterministic_eval": 1.0,
+        },
+    )
+
+    summary = json.loads((tmp_path / "metrics_summary.json").read_text(encoding="utf-8"))
+    assert summary["reward_mode"] == "terminal_only"
+    assert summary["final_train_success_rate"] == 0.375
+    assert summary["best_train_success_rate"] == 0.375
+    assert summary["final_train_total_reward"] == 0.375
+    assert summary["final_train_fuel_proxy"] == 12.5
+    assert summary["final_val_success_rate"] == 0.25
+    assert summary["best_val_success_rate"] == 0.25
+
+    report = (tmp_path / "run_report.md").read_text(encoding="utf-8")
+    assert "LunarLander Terminal-Only Run Report" in report
+    assert "Reward mode: `terminal_only`" in report
+    assert "Terminal-Only Results" in report
+    assert "Final train success rate: `0.375`" in report
+    assert "Final validation success rate: `0.25`" in report

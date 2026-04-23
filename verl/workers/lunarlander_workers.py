@@ -45,13 +45,20 @@ FUEL_PROXY_COST = {
 
 
 class LunarLanderPolicy(nn.Module):
-    def __init__(self, obs_dim: int = 8, hidden_size: int = 128, action_dim: int = 4):
+    def __init__(self, obs_dim: int = 8, hidden_size: int = 128, action_dim: int = 4, activation: str = "tanh"):
         super().__init__()
+        activation_name = str(activation).lower()
+        if activation_name == "relu":
+            activation_cls = nn.ReLU
+        elif activation_name == "tanh":
+            activation_cls = nn.Tanh
+        else:
+            raise ValueError(f"Unsupported LunarLanderPolicy activation: {activation}")
         self.net = nn.Sequential(
             nn.Linear(obs_dim, hidden_size),
-            nn.Tanh(),
+            activation_cls(),
             nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
+            activation_cls(),
             nn.Linear(hidden_size, action_dim),
         )
 
@@ -100,6 +107,29 @@ class LunarLanderActorRolloutRefWorker(Worker):
 
     def _reward_config(self) -> LunarLanderRewardConfig:
         return LunarLanderRewardConfig.from_config(self.config)
+
+    def _load_pretrained_policy_if_configured(self):
+        pretrained_policy_path = self.config.model.get("pretrained_policy_path")
+        if pretrained_policy_path in (None, "", "None"):
+            return
+
+        checkpoint = torch.load(str(pretrained_policy_path), map_location=self.device, weights_only=False)
+        if isinstance(checkpoint, dict) and "policy_state_dict" in checkpoint:
+            state_dict = checkpoint["policy_state_dict"]
+        elif isinstance(checkpoint, dict):
+            if any(key.startswith("actor.") for key in checkpoint.keys()):
+                state_dict = {f"net.{key[len('actor.'):]}": value for key, value in checkpoint.items() if key.startswith("actor.")}
+            else:
+                state_dict = checkpoint
+        else:
+            raise TypeError(f"Unsupported pretrained policy checkpoint type: {type(checkpoint)!r}")
+
+        missing, unexpected = self.policy.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                "Failed to load pretrained LunarLander policy cleanly. "
+                f"Missing keys: {missing}; unexpected keys: {unexpected}"
+            )
 
     def _build_scheduler(self):
         total_steps = max(int(self.config.actor.optim.get("total_training_steps", 0)), 1)
@@ -618,7 +648,14 @@ class LunarLanderActorRolloutRefWorker(Worker):
         hidden_size = int(self.config.model.get("hidden_size", 128))
         obs_dim = int(self.config.rollout.get("observation_dim", 8))
         action_dim = int(self.config.rollout.get("action_dim", 4))
-        self.policy = LunarLanderPolicy(obs_dim=obs_dim, hidden_size=hidden_size, action_dim=action_dim).to(self.device)
+        activation = str(self.config.model.get("activation", "tanh"))
+        self.policy = LunarLanderPolicy(
+            obs_dim=obs_dim,
+            hidden_size=hidden_size,
+            action_dim=action_dim,
+            activation=activation,
+        ).to(self.device)
+        self._load_pretrained_policy_if_configured()
 
         if self._is_actor:
             self.optimizer = torch.optim.Adam(

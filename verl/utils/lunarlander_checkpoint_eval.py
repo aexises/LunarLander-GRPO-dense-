@@ -193,7 +193,8 @@ def _component_share(weighted_values: np.ndarray, denom: np.ndarray) -> float:
 def _load_policy_from_checkpoint(checkpoint_path: Path) -> LunarLanderPolicy:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     hidden_size = int(checkpoint.get("config", {}).get("model", {}).get("hidden_size", 128))
-    policy = LunarLanderPolicy(hidden_size=hidden_size)
+    activation = str(checkpoint.get("config", {}).get("model", {}).get("activation", "tanh"))
+    policy = LunarLanderPolicy(hidden_size=hidden_size, activation=activation)
     policy.load_state_dict(checkpoint["policy_state_dict"])
     policy.eval()
     return policy

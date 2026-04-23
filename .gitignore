@@ -1,5 +1,6 @@
 
 **/*.pt
+!verl/assets/lunarlander/lunarlander_baseline_clean_seed42.pt
 **/checkpoints
 **/wget-log
 **/_build/

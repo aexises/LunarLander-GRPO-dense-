@@ -242,6 +242,30 @@ class LunarLanderArtifactLogger:
             return value
         return None
 
+    def _reward_mode(self) -> str:
+        return str(_nested_get(self.config, ["reward", "mode"], "lunarlander_shaped"))
+
+    def _latest_value_any(self, metric_names: list[str]):
+        for metric_name in metric_names:
+            value = self._latest_value(metric_name)
+            if value is not None:
+                return value
+        return None
+
+    def _latest_logged_value_any(self, metric_names: list[str]):
+        for metric_name in metric_names:
+            value = self._latest_logged_value(metric_name)
+            if value is not None:
+                return value
+        return None
+
+    def _peak_any(self, metric_names: list[str]):
+        for metric_name in metric_names:
+            value = self._peak(metric_name)
+            if value is not None:
+                return value
+        return None
+
     def _peak_value(self, metric_name: str):
         values = [value for _, value in [self._series(metric_name)] if False]
         xs, ys = self._series(metric_name)
@@ -250,23 +274,72 @@ class LunarLanderArtifactLogger:
         return max(ys)
 
     def _final_summary(self) -> dict[str, Any]:
+        reward_mode = self._reward_mode()
+        train_success_metrics = ["train_reward/success_rate"]
+        train_total_reward_metrics = ["train_reward/mean_total_reward"]
+        train_fuel_metrics = ["train_reward/mean_fuel_proxy"]
+        val_success_metrics = ["val/test_reward/success_rate"]
+        val_total_reward_metrics = ["val/test_reward/mean_total_reward"]
+        val_fuel_metrics = ["val/test_reward/mean_fuel_proxy"]
+
+        if reward_mode == "terminal_only":
+            train_success_metrics.extend(
+                [
+                    "train_verify_score/success_rate",
+                    "train_verify_score/all",
+                    "audit_trace/train_success_rate",
+                    "critic/task/success_rate",
+                ]
+            )
+            train_total_reward_metrics.extend(
+                [
+                    "train_verify_score/mean_total_reward",
+                    "critic/reward_components/mean_total_reward",
+                    "train_reward/reward_all",
+                ]
+            )
+            train_fuel_metrics.extend(
+                [
+                    "train_verify_score/mean_fuel_proxy",
+                    "critic/task/mean_fuel_proxy",
+                ]
+            )
+            val_success_metrics.extend(
+                [
+                    "val/test_score/all",
+                    "audit_trace/val_success_rate",
+                ]
+            )
+            val_total_reward_metrics.extend(["val/test_reward/all"])
+
         summary = {
             "environment": _nested_get(self.config, ["actor_rollout_ref", "rollout", "env_name"], "LunarLander-v3"),
-            "final_train_success_rate": self._latest_value("train_reward/success_rate"),
-            "best_train_success_rate": self._peak("train_reward/success_rate"),
-            "final_val_success_rate": self._latest_value("val/test_reward/success_rate"),
-            "best_val_success_rate": self._peak("val/test_reward/success_rate"),
-            "final_train_total_reward": self._latest_value("train_reward/mean_total_reward"),
-            "final_val_total_reward": self._latest_value("val/test_reward/mean_total_reward"),
-            "final_train_fuel_proxy": self._latest_value("train_reward/mean_fuel_proxy"),
-            "final_val_fuel_proxy": self._latest_value("val/test_reward/mean_fuel_proxy"),
+            "reward_mode": reward_mode,
+            "final_train_success_rate": self._latest_value_any(train_success_metrics),
+            "best_train_success_rate": self._peak_any(train_success_metrics),
+            "final_val_success_rate": self._latest_value_any(val_success_metrics),
+            "best_val_success_rate": self._peak_any(val_success_metrics),
+            "final_train_total_reward": self._latest_value_any(train_total_reward_metrics),
+            "final_val_total_reward": self._latest_value_any(val_total_reward_metrics),
+            "final_train_fuel_proxy": self._latest_value_any(train_fuel_metrics),
+            "final_val_fuel_proxy": self._latest_value_any(val_fuel_metrics),
             "final_reward_hacking_warning": self._latest_value("diagnostics/reward_hacking_warning"),
             "final_train_phase_counts": {
-                phase: self._latest_value(f"train_reward/phase_counts/{phase}")
+                phase: self._latest_value_any(
+                    [
+                        f"train_reward/phase_counts/{phase}",
+                        f"train_verify_score/phase_counts/{phase}",
+                    ]
+                )
                 for phase in ("approach", "align", "descend", "touchdown")
             },
             "final_train_phase_episode_counts": {
-                phase: self._latest_value(f"train_reward/phase_episode_counts/{phase}")
+                phase: self._latest_value_any(
+                    [
+                        f"train_reward/phase_episode_counts/{phase}",
+                        f"train_verify_score/phase_episode_counts/{phase}",
+                    ]
+                )
                 for phase in ("approach", "align", "descend", "touchdown")
             },
             "final_val_phase_counts": {
@@ -277,12 +350,29 @@ class LunarLanderArtifactLogger:
                 phase: self._latest_value(f"val/test_reward/phase_episode_counts/{phase}")
                 for phase in ("approach", "align", "descend", "touchdown")
             },
-            "final_train_num_phase_transitions": self._latest_value("train_reward/mean_num_phase_transitions"),
+            "final_train_num_phase_transitions": self._latest_value_any(
+                ["train_reward/mean_num_phase_transitions", "train_verify_score/mean_num_phase_transitions"]
+            ),
             "final_val_num_phase_transitions": self._latest_value("val/test_reward/mean_num_phase_transitions"),
             "final_train_micro_progress_counts": {
-                "enter_x_corridor_070": self._latest_value("train_reward/episodes_with_micro_progress/enter_x_corridor_070"),
-                "enter_x_corridor_050": self._latest_value("train_reward/episodes_with_micro_progress/enter_x_corridor_050"),
-                "enter_x_corridor_035": self._latest_value("train_reward/episodes_with_micro_progress/enter_x_corridor_035"),
+                "enter_x_corridor_070": self._latest_value_any(
+                    [
+                        "train_reward/episodes_with_micro_progress/enter_x_corridor_070",
+                        "train_verify_score/episodes_with_micro_progress/enter_x_corridor_070",
+                    ]
+                ),
+                "enter_x_corridor_050": self._latest_value_any(
+                    [
+                        "train_reward/episodes_with_micro_progress/enter_x_corridor_050",
+                        "train_verify_score/episodes_with_micro_progress/enter_x_corridor_050",
+                    ]
+                ),
+                "enter_x_corridor_035": self._latest_value_any(
+                    [
+                        "train_reward/episodes_with_micro_progress/enter_x_corridor_035",
+                        "train_verify_score/episodes_with_micro_progress/enter_x_corridor_035",
+                    ]
+                ),
             },
             "final_val_micro_progress_counts": {
                 "enter_x_corridor_070": self._latest_value("val/test_reward/episodes_with_micro_progress/enter_x_corridor_070"),
@@ -290,11 +380,21 @@ class LunarLanderArtifactLogger:
                 "enter_x_corridor_035": self._latest_value("val/test_reward/episodes_with_micro_progress/enter_x_corridor_035"),
             },
             "final_train_reward_shares": {
-                "subgoal": self._latest_value("train_reward/share_abs_weighted_r_sub"),
-                "progress": self._latest_value("train_reward/share_abs_weighted_r_prog"),
-                "micro_progress": self._latest_value("train_reward/share_abs_weighted_r_micro"),
-                "smoothness": self._latest_value("train_reward/share_abs_weighted_r_smooth"),
-                "final": self._latest_value("train_reward/share_abs_weighted_r_final"),
+                "subgoal": self._latest_value_any(
+                    ["train_reward/share_abs_weighted_r_sub", "train_verify_score/share_abs_weighted_r_sub"]
+                ),
+                "progress": self._latest_value_any(
+                    ["train_reward/share_abs_weighted_r_prog", "train_verify_score/share_abs_weighted_r_prog"]
+                ),
+                "micro_progress": self._latest_value_any(
+                    ["train_reward/share_abs_weighted_r_micro", "train_verify_score/share_abs_weighted_r_micro"]
+                ),
+                "smoothness": self._latest_value_any(
+                    ["train_reward/share_abs_weighted_r_smooth", "train_verify_score/share_abs_weighted_r_smooth"]
+                ),
+                "final": self._latest_value_any(
+                    ["train_reward/share_abs_weighted_r_final", "train_verify_score/share_abs_weighted_r_final"]
+                ),
             },
             "final_val_reward_shares": {
                 "subgoal": self._latest_value("val/test_reward/share_abs_weighted_r_sub"),
@@ -306,8 +406,8 @@ class LunarLanderArtifactLogger:
             "final_val_num_eval_episodes": self._latest_value("val/test_meta/num_eval_episodes"),
             "final_eval_num_seeds_configured": self._latest_value("val/test_meta/num_eval_seeds_configured"),
             "final_eval_full_seed_coverage": self._latest_value("val/test_meta/eval_full_seed_coverage"),
-            "final_eval_seed_hash": self._latest_logged_value("val/test_meta/eval_seed_hash"),
-            "final_eval_seed_list": self._latest_logged_value("val/test_meta/eval_seed_list"),
+            "final_eval_seed_hash": self._latest_logged_value_any(["val/test_meta/eval_seed_hash"]),
+            "final_eval_seed_list": self._latest_logged_value_any(["val/test_meta/eval_seed_list"]),
             "final_eval_deterministic": self._latest_value("val/test_meta/deterministic_eval"),
         }
         with self.summary_json_path.open("w", encoding="utf-8") as file_obj:
@@ -322,6 +422,7 @@ class LunarLanderArtifactLogger:
 
     def write_run_report(self):
         summary = self._final_summary()
+        reward_mode = self._reward_mode()
         reward_cfg = self.config.get("reward", {})
         weights = reward_cfg.get("weights", {})
         eval_cfg = self.config.get("eval", {})
@@ -349,6 +450,69 @@ class LunarLanderArtifactLogger:
         interpretation_lines.append(
             "- LunarLander remains a classical control sanity check only; any positive result here validates reward plumbing, not VLA transfer."
         )
+
+        if reward_mode == "terminal_only":
+            report = f"""# LunarLander Terminal-Only Run Report
+
+## Setup
+
+- Environment: `{rollout_cfg.get("env_name", "LunarLander-v3")}`
+- Experiment name: `{current_ablation}`
+- Reward mode: `terminal_only`
+- Train batch size: `{data_cfg.get("train_batch_size")}`
+- Validation batch size: `{data_cfg.get("val_batch_size")}`
+- Samples per prompt: `{data_cfg.get("n_samples")}`
+- PPO epochs: `{actor_cfg.get("ppo_epochs")}`
+- Learning rate: `{_nested_get(self.config, ["actor_rollout_ref", "actor", "optim", "lr"])}`
+- Evaluation seeds: `{eval_cfg.get("seed_list", [])}`
+- Eval seed hash: `{hashlib.md5(json.dumps(eval_cfg.get("seed_list", []), sort_keys=True).encode("utf-8")).hexdigest()[:12]}`
+- Deterministic eval: `{summary.get("final_eval_deterministic")}`
+- Evaluated episodes per validation window: `{summary.get("final_val_num_eval_episodes")}`
+
+## Reward Semantics
+
+- Learning reward: binary terminal-only outcome.
+- Per-step learning reward: `0` before the episode ends.
+- Terminal learning reward: `1` if the episode succeeds, else `0`.
+- Success source: explicit environment success flag when available, otherwise full-episode return semantics.
+- Configured weights: `sub={weights.get("sub")}`, `prog={weights.get("prog")}`, `smooth={weights.get("smooth")}`, `final={weights.get("final")}`
+
+## Terminal-Only Results
+
+- Final train success rate: `{summary.get("final_train_success_rate")}`
+- Best train success rate: `{summary.get("best_train_success_rate")}`
+- Final validation success rate: `{summary.get("final_val_success_rate")}`
+- Best validation success rate: `{summary.get("best_val_success_rate")}`
+- Final train reward: `{summary.get("final_train_total_reward")}`
+- Final validation reward: `{summary.get("final_val_total_reward")}`
+- Final train fuel proxy: `{summary.get("final_train_fuel_proxy")}`
+- Final validation fuel proxy: `{summary.get("final_val_fuel_proxy")}`
+- Validation seed coverage: `{summary.get("final_val_num_eval_episodes")}` / `{summary.get("final_eval_num_seeds_configured")}` episodes, full coverage=`{summary.get("final_eval_full_seed_coverage")}`
+
+## Supplementary Diagnostics
+
+- Final train phase counts: `{summary.get("final_train_phase_counts")}`
+- Final validation phase counts: `{summary.get("final_val_phase_counts")}`
+- Final train phase episode counts: `{summary.get("final_train_phase_episode_counts")}`
+- Final validation phase episode counts: `{summary.get("final_val_phase_episode_counts")}`
+- Final train mean phase transitions: `{summary.get("final_train_num_phase_transitions")}`
+- Final validation mean phase transitions: `{summary.get("final_val_num_phase_transitions")}`
+- Reward overview plot: `plots/reward_overview.png`
+- Task metrics plot: `plots/task_metrics_train.png`
+- Fuel proxy plot: `plots/fuel_proxy.png`
+- Trajectory dumps: `trajectory_dumps/`
+- Audit traces: `audit_traces_train.csv`, `audit_traces_val.csv`
+
+## Interpretation
+
+- Terminal-only runs are summarized from the terminal-success metrics first, with verifier and audit metrics used as fallbacks when the shaped-reward metric namespace is absent.
+- Phase and reward-share diagnostics are supplementary here, because the optimizer is driven only by the terminal binary outcome.
+- Reward-hacking warnings are primarily a shaped-reward diagnostic, so `n/a` or missing values here are expected.
+{chr(10).join(interpretation_lines)}
+"""
+            with self.report_path.open("w", encoding="utf-8") as file_obj:
+                file_obj.write(report)
+            return
 
         report = f"""# LunarLander Run Report
 

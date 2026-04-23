@@ -18,6 +18,14 @@ TOTAL_EPOCHS="${TOTAL_EPOCHS:-20}"
 TEST_FREQ="${TEST_FREQ:-10}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
 MAX_STEPS="${MAX_STEPS:-400}"
+LUNARLANDER_PRETRAINED_POLICY="${LUNARLANDER_PRETRAINED_POLICY:-verl/assets/lunarlander/lunarlander_baseline_clean_seed42.pt}"
+LUNARLANDER_POLICY_ACTIVATION="${LUNARLANDER_POLICY_ACTIVATION:-relu}"
+
+if [ ! -f "$LUNARLANDER_PRETRAINED_POLICY" ]; then
+  echo "Missing LunarLander pretrained policy: $LUNARLANDER_PRETRAINED_POLICY"
+  echo "Terminal-reward GRPO is configured as anchor adaptation, not random-init training."
+  exit 1
+fi
 
 case "$ABLATION" in
   terminal_only)
@@ -71,7 +79,9 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
   actor_rollout_ref.model.action_token_len=1 \
   actor_rollout_ref.model.action_chunks_len=1 \
   actor_rollout_ref.model.hidden_size=128 \
+  actor_rollout_ref.model.activation=$LUNARLANDER_POLICY_ACTIVATION \
   actor_rollout_ref.model.seed=0 \
+  actor_rollout_ref.model.pretrained_policy_path=$LUNARLANDER_PRETRAINED_POLICY \
   actor_rollout_ref.actor.strategy=fsdp \
   actor_rollout_ref.actor.optim.lr=3e-4 \
   actor_rollout_ref.actor.optim.warmup_style=constant \

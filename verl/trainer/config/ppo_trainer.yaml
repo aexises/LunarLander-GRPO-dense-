@@ -28,7 +28,9 @@ actor_rollout_ref:
     action_token_len: 7
     action_chunks_len: 8
     hidden_size: 128
+    activation: tanh
     seed: 0
+    pretrained_policy_path: null
     resume: False
     path: ~/models/deepseek-llm-7b-chat
     external_lib: null
